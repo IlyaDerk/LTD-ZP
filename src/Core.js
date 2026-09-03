@@ -1,6 +1,6 @@
 var PayrollCore = (function () {
   'use strict';
-  var STATUS = { PLANNED: 'PLANNED', TO_PAY: 'TO_PAY', PAID: 'PAID', REVIEW: 'NEEDS_REVIEW', CANCELLED: 'CANCELLED' };
+  var STATUS = { PLANNED: 'PLANNED', TO_PAY: 'TO_PAY', PAID: 'PAID', CANCELLED: 'CANCELLED' };
 
   function norm(v) { return String(v == null ? '' : v).trim().replace(/\s+/g, ' ').toLocaleLowerCase('ru-RU'); }
   function iso(v) {
@@ -18,18 +18,6 @@ var PayrollCore = (function () {
     if (!norm(deal.visualizer)) return null;
     return { acts: 3, same: norm(deal.visualizer) === norm(deal.engineer) };
   }
-  function eligible(rule, deal, employee, s) {
-    var id = rule.id;
-    if (id.indexOf('R_2_') === 0) return s.acts === 2;
-    if (id.indexOf('R_3_SAME_') === 0) return s.acts === 3 && s.same;
-    if (id === 'R_3_SPLIT_ENGINEERING') return s.acts === 3 && !s.same;
-    if (id === 'R_3_SPLIT_VISUAL_3D') return s.acts === 3 && !s.same && norm(deal.visualType).indexOf('3d') >= 0;
-    if (id === 'R_3_SPLIT_COLLAGE') return s.acts === 3 && !s.same && norm(deal.visualType).indexOf('коллаж') >= 0;
-    if (id === 'R_TAMBOV_ROLLOUTS') return /^(да|есть)$/i.test(String(deal.rollouts || '').trim()) && employee && norm(employee.model) === 'тамбов';
-    if (id === 'R_REPAIR_MSK_DESIGNER') return employee && norm(employee.model) === 'москва';
-    if (id === 'R_REPAIR_TMB_DESIGNER') return employee && norm(employee.model) === 'тамбов';
-    return false;
-  }
   function readyDate(rule, d) {
     if (rule.id === 'R_2_PART_1' || rule.id === 'R_TAMBOV_ROLLOUTS') return iso(d.act1);
     if (rule.id === 'R_2_PART_2') return iso(d.act2);
@@ -40,7 +28,8 @@ var PayrollCore = (function () {
     if (rule.id.indexOf('R_REPAIR_') === 0) return iso(d.repairDate);
     return '';
   }
-  function recipientName(rule, deal) { return norm(rule.recipient).indexOf('визуализатор') >= 0 ? deal.visualizer : deal.engineer; }
+  function recipientSlot(rule) { return norm(rule.recipient).indexOf('визуализатор') >= 0 ? 'visualizer' : 'engineer'; }
+  function recipientName(rule, deal) { return recipientSlot(rule) === 'visualizer' ? deal.visualizer : deal.engineer; }
   function findEmployee(rows, name, date) {
     var matches = rows.filter(function (e) { return norm(e.name) === norm(name) && activeOn(e, date); });
     return matches.length === 1 ? { value: matches[0] } : { error: !matches.length ? 'ФИО «' + name + '» отсутствует в действующем справочнике сотрудников' : 'Для ФИО «' + name + '» найдено несколько действующих записей' };
@@ -57,6 +46,7 @@ var PayrollCore = (function () {
     var key = rule.id.indexOf('R_REPAIR_') === 0 ? 'Бонус за ремонт' : model === 'москва' ? employee.grade : workKey(rule, deal);
     var found = rows.filter(function (r) { return activeOn(r, date) && norm(r.key) === norm(key) && (model !== 'тамбов' || norm(r.grade) === norm(employee.grade)); });
     if (found.length !== 1) return { error: 'Для модели «' + employee.model + '», грейда «' + employee.grade + '» и работы «' + key + '» ' + (found.length ? 'найдено несколько ставок' : 'не найдена действующая ставка') };
+    if (!Number.isFinite(Number(found[0].rate)) || Number(found[0].rate) <= 0) return { error: 'Ставка для модели «' + employee.model + '», грейда «' + employee.grade + '» и работы «' + key + '» должна быть положительным числом' };
     return { value: found[0] };
   }
   function makeId(parts) {
@@ -64,46 +54,97 @@ var PayrollCore = (function () {
     for (var i = 0; i < str.length; i += 1) { hash ^= str.charCodeAt(i); hash = Math.imul(hash, 16777619); }
     return 'PAY-' + (hash >>> 0).toString(16).padStart(8, '0').toUpperCase();
   }
+  function addError(errors, reason) { if (reason && errors.indexOf(reason) < 0) errors.push(reason); }
+  function oneRule(rules, id, errors) {
+    var found = rules.filter(function (rule) { return rule.active && rule.id === id; });
+    if (found.length !== 1) {
+      addError(errors, found.length ? 'Для правила «' + id + '» найдено несколько активных записей' : 'Не найдено активное правило «' + id + '»');
+      return null;
+    }
+    return found[0];
+  }
+  function validateEmployee(rows, name, date, errors) {
+    if (!norm(name) || norm(name) === 'нет') { addError(errors, 'Не указан получатель выплаты'); return null; }
+    var result = findEmployee(rows, name, date);
+    if (result.error) { addError(errors, result.error); return null; }
+    var employee = result.value, model = norm(employee.model);
+    if (model !== 'москва' && model !== 'тамбов') addError(errors, 'Для сотрудника «' + name + '» не указана поддерживаемая модель мотивации');
+    if (!norm(employee.grade)) addError(errors, 'Для сотрудника «' + name + '» не указан грейд');
+    return employee;
+  }
+  function expectedDesignRuleIds(deal, s, errors) {
+    if (s.acts === 2) return ['R_2_PART_1', 'R_2_PART_2'];
+    if (s.same) return ['R_3_SAME_PART_1', 'R_3_SAME_PART_2'];
+    if (norm(deal.visualType).indexOf('3d') >= 0) return ['R_3_SPLIT_ENGINEERING', 'R_3_SPLIT_VISUAL_3D'];
+    if (norm(deal.visualType).indexOf('коллаж') >= 0) return ['R_3_SPLIT_ENGINEERING', 'R_3_SPLIT_COLLAGE'];
+    addError(errors, 'Для сделки с тремя актами не указан поддерживаемый тип визуализации');
+    return ['R_3_SPLIT_ENGINEERING'];
+  }
+  function candidateRules(input, deal, s, errors, now) {
+    var candidates = [];
+    expectedDesignRuleIds(deal, s, errors).forEach(function (id) { var rule = oneRule(input.rules, id, errors); if (rule) candidates.push(rule); });
+    var repairEmployee = validateEmployee(input.employees, deal.engineer, iso(deal.repairDate) || now, errors);
+    if (repairEmployee) {
+      var model = norm(repairEmployee.model);
+      if (model === 'москва' || model === 'тамбов') {
+        var repairId = model === 'москва' ? 'R_REPAIR_MSK_DESIGNER' : 'R_REPAIR_TMB_DESIGNER';
+        var repairRule = oneRule(input.rules, repairId, errors); if (repairRule) candidates.push(repairRule);
+      }
+    }
+    if (/^(да|есть)$/i.test(String(deal.rollouts || '').trim())) {
+      var rolloutRule = oneRule(input.rules, 'R_TAMBOV_ROLLOUTS', errors);
+      var rolloutEmployee = validateEmployee(input.employees, deal.engineer, iso(deal.act1) || now, errors);
+      if (rolloutEmployee && norm(rolloutEmployee.model) !== 'тамбов') addError(errors, 'Для развёрток требуется сотрудник с моделью мотивации «Тамбов»');
+      if (rolloutRule && rolloutEmployee && norm(rolloutEmployee.model) === 'тамбов') candidates.push(rolloutRule);
+    }
+    return candidates;
+  }
+  function calculateDeal(input, deal, now) {
+    var errors = [], items = [], s = structure(deal);
+    if (!norm(deal.engineer)) addError(errors, 'Не указан инженер-дизайнер');
+    if (!s) addError(errors, 'Заполните поле «Визуализатор / Нет»: «Нет» для двух актов или однозначное ФИО для трёх актов');
+    if (!s) return { rows: [], reasons: errors };
+    var rules = candidateRules(input, deal, s, errors, now);
+    rules.forEach(function (rule) {
+      var date = readyDate(rule, deal), employee = validateEmployee(input.employees, recipientName(rule, deal), date || now, errors);
+      if (!employee) return;
+      var model = norm(employee.model);
+      if (model !== 'москва' && model !== 'тамбов') return;
+      var base = model === 'москва' || rule.id.indexOf('R_REPAIR_') === 0 ? Number(deal.projectCost) : Number(deal.area);
+      if (!Number.isFinite(base) || base <= 0) addError(errors, 'Расчётная база для правила «' + rule.id + '» должна быть положительным числом');
+      var rateResult = rateFor(rule, deal, employee, input.matrices, date || now);
+      if (rateResult.error) addError(errors, rateResult.error);
+      if (!Number.isFinite(Number(rule.share)) || Number(rule.share) <= 0) addError(errors, 'Доля правила «' + rule.id + '» должна быть положительным числом');
+      if (!Number.isFinite(base) || base <= 0 || rateResult.error || !Number.isFinite(Number(rule.share)) || Number(rule.share) <= 0) return;
+      var slot = recipientSlot(rule), naturalKey = [deal.id, rule.id, rule.articleCode, slot].join('|');
+      items.push({ id: makeId([deal.id, rule.id, rule.articleCode, slot]), naturalKey: naturalKey, dealId: String(deal.id), employeeId: employee.id, articleCode: rule.articleCode, ruleId: rule.id, recipientSlot: slot, base: base, rate: Number(rateResult.value.rate), share: Number(rule.share), fund: Math.round(base * Number(rateResult.value.rate)), readyDate: date, status: date ? STATUS.TO_PAY : STATUS.PLANNED, paid: false, paymentDate: '', comment: '' });
+    });
+    return errors.length ? { rows: [], reasons: errors } : { rows: items, reasons: [] };
+  }
   function calculate(input) {
-    var out = [], now = iso(input.now || new Date());
+    var out = [], skippedDeals = [], now = iso(input.now || new Date());
     input.deals.forEach(function (deal) {
-      var s = structure(deal);
-      if (!s) {
-        out.push({ id: makeId([deal.id, 'STRUCTURE_REVIEW']), naturalKey: [deal.id, 'STRUCTURE_REVIEW'].join('|'), dealId: String(deal.id), employeeId: '', articleCode: '', ruleId: '', recipientSlot: 'engineer', readyDate: '', status: STATUS.REVIEW, paid: false, paymentDate: '', reviewReason: 'Заполните поле «Визуализатор / Нет»: «Нет» для двух актов или однозначное ФИО для трёх актов', comment: '' });
+      var result = calculateDeal(input, deal, now);
+      if (result.reasons.length) {
+        var skipped = { dealId: String(deal.id), reasons: result.reasons };
+        skippedDeals.push(skipped);
+        if (typeof console !== 'undefined' && console.warn) console.warn('Сделка ' + skipped.dealId + ' пропущена: ' + skipped.reasons.join('; '));
         return;
       }
-      input.rules.filter(function (r) { return r.active; }).forEach(function (rule) {
-        var provisionalDate = readyDate(rule, deal) || now;
-        var employeeResult = findEmployee(input.employees, recipientName(rule, deal), provisionalDate);
-        var employee = employeeResult.value;
-        if (!eligible(rule, deal, employee, s)) return;
-        var slot = norm(rule.recipient).indexOf('визуализатор') >= 0 ? 'visualizer' : 'engineer';
-        var naturalKey = [deal.id, rule.id, rule.articleCode, slot].join('|');
-        var item = { id: makeId([deal.id, rule.id, rule.articleCode, slot]), naturalKey: naturalKey, dealId: String(deal.id), employeeId: employee ? employee.id : '', articleCode: rule.articleCode, ruleId: rule.id, recipientSlot: slot, readyDate: readyDate(rule, deal), paid: false, paymentDate: '', comment: '' };
-        if (employeeResult.error) { item.status = STATUS.REVIEW; item.reviewReason = employeeResult.error; out.push(item); return; }
-        var rateResult = rateFor(rule, deal, employee, input.matrices, item.readyDate || now);
-        var base = norm(employee.model) === 'москва' || rule.id.indexOf('R_REPAIR_') === 0 ? Number(deal.projectCost) : Number(deal.area);
-        if (!Number.isFinite(base) || base <= 0) { item.status = STATUS.REVIEW; item.reviewReason = 'Заполните положительную расчётную базу для сделки ' + deal.id; out.push(item); return; }
-        if (rateResult.error) { item.status = STATUS.REVIEW; item.reviewReason = rateResult.error; out.push(item); return; }
-        item.base = base; item.rate = Number(rateResult.value.rate); item.share = Number(rule.share); item.fund = Math.round(base * item.rate); item.status = item.readyDate ? STATUS.TO_PAY : STATUS.PLANNED; item.reviewReason = '';
-        out.push(item);
-      });
-      if (/^(да|есть)$/i.test(String(deal.rollouts || '').trim()) && !out.some(function (x) { return x.dealId === String(deal.id) && x.articleCode === 'DESIGN_ROLLOUTS'; })) {
-        out.push({ id: makeId([deal.id, 'ROLLOUTS_NO_RULE', 'engineer']), naturalKey: [deal.id, 'ROLLOUTS_NO_RULE', 'DESIGN_ROLLOUTS', 'engineer'].join('|'), dealId: String(deal.id), employeeId: '', articleCode: 'DESIGN_ROLLOUTS', ruleId: '', recipientSlot: 'engineer', readyDate: iso(deal.act1), status: STATUS.REVIEW, paid: false, paymentDate: '', reviewReason: 'Для модели инженера не найдено активное правило расчёта развёрток; добавьте однозначное правило и ставку в матрицу', comment: '' });
-      }
+      Array.prototype.push.apply(out, result.rows);
     });
     var groups = {};
-    out.filter(function (x) { return x.status !== STATUS.REVIEW; }).forEach(function (x) { var k = x.dealId + '|' + x.employeeId + '|' + x.fund; (groups[k] || (groups[k] = [])).push(x); });
+    out.forEach(function (x) { var k = x.dealId + '|' + x.employeeId + '|' + x.fund; (groups[k] || (groups[k] = [])).push(x); });
     Object.keys(groups).forEach(function (k) {
       var xs = groups[k].sort(function (a, b) { return a.ruleId.localeCompare(b.ruleId); });
-      if (xs.length > 1 && Math.abs(xs.reduce(function (s, x) { return s + x.share; }, 0) - 1) < 1e-9) {
+      if (xs.length > 1 && Math.abs(xs.reduce(function (sum, x) { return sum + x.share; }, 0) - 1) < 1e-9) {
         var rest = 0; for (var i = 1; i < xs.length; i += 1) { xs[i].amount = Math.floor(xs[i].fund * xs[i].share); rest += xs[i].amount; } xs[0].amount = xs[0].fund - rest;
       } else xs.forEach(function (x) { x.amount = Math.round(x.fund * x.share); });
     });
-    return out;
+    return { rows: out, skippedDeals: skippedDeals };
   }
   function comparable(x) {
-    var keys = ['id', 'dealId', 'employeeId', 'articleCode', 'ruleId', 'base', 'rate', 'share', 'amount', 'readyDate', 'status', 'paid', 'paymentDate', 'reviewReason', 'comment'];
+    var keys = ['id', 'dealId', 'employeeId', 'articleCode', 'ruleId', 'base', 'rate', 'share', 'amount', 'readyDate', 'status', 'paid', 'paymentDate', 'comment'];
     var c = {}; keys.forEach(function (k) { c[k] = x[k] == null ? '' : x[k]; }); return JSON.stringify(c);
   }
   function reconcile(existing, calculated, now) {

@@ -7,9 +7,9 @@ function withPayrollLock(action) {
 function dailySync() {
   return withPayrollLock(function () {
     var ss = SpreadsheetApp.openById(PAYROLL_CONFIG.spreadsheetId), data = readPayrollWorkbook(ss);
-    var calculated = PayrollCore.calculate(data), results = PayrollCore.reconcile(data.existing, calculated, new Date().toISOString());
-    var count = writePayrollChanges(data.paymentTable, results); rebuildReviewSheet(ss, results.map(function (x) { return x.row; }), data.deals);
-    return { calculated: calculated.length, written: count, review: calculated.filter(function (x) { return x.status === 'NEEDS_REVIEW'; }).length };
+    var calculation = PayrollCore.calculate(data), results = PayrollCore.reconcile(data.existing, calculation.rows, new Date().toISOString());
+    var count = writePayrollChanges(data.paymentTable, results);
+    return { calculated: calculation.rows.length, written: count, skipped: calculation.skippedDeals.length, skippedDeals: calculation.skippedDeals };
   });
 }
 
@@ -22,17 +22,27 @@ function handlePaymentEdit(e) {
     var statusColumn = table.headers.indexOf('Статус') + 1, paymentDateColumn = table.headers.indexOf('Дата выплаты') + 1, updatedColumn = table.headers.indexOf('Обновлено') + 1;
     var current = status(sheet.getRange(e.range.getRow(), statusColumn).getValue());
     if (String(e.value).toUpperCase() !== 'TRUE') { if (current === PayrollCore.STATUS.PAID) e.range.setValue(true); return; }
-    if (current !== PayrollCore.STATUS.TO_PAY) { e.range.setValue(false); e.source.toast('Оплата разрешена только для статьи со статусом TO_PAY'); return; }
-    sheet.getRange(e.range.getRow(), statusColumn).setValue(PayrollCore.STATUS.PAID);
+    if (current !== PayrollCore.STATUS.TO_PAY) { e.range.setValue(false); e.source.toast('Оплата разрешена только для статьи со статусом «К оплате»'); return; }
+    sheet.getRange(e.range.getRow(), statusColumn).setValue(displayStatus(PayrollCore.STATUS.PAID));
     sheet.getRange(e.range.getRow(), paymentDateColumn).setValue(new Date());
     if (updatedColumn > 0) sheet.getRange(e.range.getRow(), updatedColumn).setValue(new Date());
   });
 }
 
 function setup() {
-  var ss = SpreadsheetApp.openById(PAYROLL_CONFIG.spreadsheetId); ensurePaymentCheckbox(ss); readPayrollWorkbook(ss);
+  var ss = SpreadsheetApp.openById(PAYROLL_CONFIG.spreadsheetId);
+  readPayrollWorkbook(ss);
+  ensurePaymentCheckbox(ss);
   var triggers = ScriptApp.getProjectTriggers();
-  if (!triggers.some(function (t) { return t.getHandlerFunction() === 'dailySync'; })) ScriptApp.newTrigger('dailySync').timeBased().everyDays(1).atHour(5).create();
-  if (!triggers.some(function (t) { return t.getHandlerFunction() === 'handlePaymentEdit'; })) ScriptApp.newTrigger('handlePaymentEdit').forSpreadsheet(ss).onEdit().create();
+  ensureSingleTrigger(triggers, 'dailySync', function () { return ScriptApp.newTrigger('dailySync').timeBased().everyDays(1).atHour(5); });
+  ensureSingleTrigger(triggers, 'handlePaymentEdit', function () { return ScriptApp.newTrigger('handlePaymentEdit').forSpreadsheet(ss).onEdit(); });
   return 'Проверка завершена, триггеры настроены без дублей';
 }
+
+function ensureSingleTrigger(triggers, handler, builder) {
+  var matches = triggers.filter(function (trigger) { return trigger.getHandlerFunction() === handler; });
+  matches.slice(1).forEach(function (trigger) { ScriptApp.deleteTrigger(trigger); });
+  if (!matches.length) builder().create();
+}
+
+if (typeof module !== 'undefined') module.exports = { dailySync: dailySync, handlePaymentEdit: handlePaymentEdit, setup: setup, ensureSingleTrigger: ensureSingleTrigger };

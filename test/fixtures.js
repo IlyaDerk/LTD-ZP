@@ -1,6 +1,8 @@
 const rules = [
   ['R_2_PART_1', 'DESIGN_PART_1', 'Инженер-дизайнер', .5],
   ['R_2_PART_2', 'DESIGN_PART_2', 'Инженер-дизайнер', .5],
+  ['R_3_SAME_PART_1', 'DESIGN_PART_1', 'Инженер-дизайнер', .5],
+  ['R_3_SAME_PART_2', 'DESIGN_PART_2', 'Инженер-дизайнер', .5],
   ['R_3_SPLIT_ENGINEERING', 'DESIGN_ENGINEERING', 'Инженер-дизайнер', 1],
   ['R_3_SPLIT_VISUAL_3D', 'DESIGN_VISUAL_3D', 'Визуализатор', 1],
   ['R_3_SPLIT_COLLAGE', 'DESIGN_VISUAL_COLLAGE', 'Визуализатор', 1],
