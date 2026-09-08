@@ -4,6 +4,8 @@ var PayrollCore = (function () {
 
   function norm(v) { return String(v == null ? '' : v).trim().replace(/\s+/g, ' ').toLocaleLowerCase('ru-RU'); }
   function iso(v) {
+    // Dates here represent instants in UTC. Sheet calendar dates are normalized
+    // in the adapter using the spreadsheet's timezone before entering the core.
     if (!v) return '';
     if (v instanceof Date) return isNaN(v.getTime()) ? '' : v.toISOString().slice(0, 10);
     var m = String(v).trim().match(/^(\d{1,2})[./](\d{1,2})[./](\d{4})$/);
@@ -156,8 +158,9 @@ var PayrollCore = (function () {
     return calculated.map(function (next) {
       var old = byId[next.id] || byKey[next.naturalKey];
       if (old && (old.status === STATUS.PAID || old.status === STATUS.CANCELLED)) return { row: old, changed: false };
+      if (old) next = Object.assign({}, next, { id: old.id, paid: old.paid, paymentDate: old.paymentDate, comment: old.comment });
       if (old && comparable(old) === comparable(Object.assign({}, next, { createdAt: old.createdAt, updatedAt: old.updatedAt }))) return { row: old, changed: false };
-      return { row: Object.assign({}, next, { _row: old && old._row, _values: old && old._values, id: old ? old.id : next.id, createdAt: old ? old.createdAt : now, updatedAt: now }), changed: true };
+      return { row: Object.assign({}, next, { _row: old && old._row, _values: old && old._values, _formulas: old && old._formulas, id: old ? old.id : next.id, createdAt: old ? old.createdAt : now, updatedAt: now }), changed: true };
     });
   }
   function pay(row, date) {

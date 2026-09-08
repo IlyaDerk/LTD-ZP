@@ -9,6 +9,7 @@ function dailySync() {
     var ss = SpreadsheetApp.openById(PAYROLL_CONFIG.spreadsheetId), data = readPayrollWorkbook(ss);
     var calculation = PayrollCore.calculate(data), results = PayrollCore.reconcile(data.existing, calculation.rows, new Date().toISOString());
     var count = writePayrollChanges(data.paymentTable, results);
+    console.info('dailySync: рассчитано ' + calculation.rows.length + ', записано ' + count + ', пропущено сделок ' + calculation.skippedDeals.length);
     return { calculated: calculation.rows.length, written: count, skipped: calculation.skippedDeals.length, skippedDeals: calculation.skippedDeals };
   });
 }

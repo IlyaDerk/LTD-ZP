@@ -29,16 +29,17 @@ test('статусы отображаются по-русски и читают�
 });
 
 test('запись выплаты использует русский статус и сохраняет существующий необязательный столбец', () => {
-  let written;
+  const written = [];
   const table = {
     headers: ['ID статьи', 'ID сделки', 'ID сотрудника', 'Код статьи', 'ID правила', 'Расчётная база', 'Ставка', 'Доля', 'Расчётная сумма', 'Дата готовности', 'Статус', 'Оплатить', 'Дата выплаты', 'Причина уточнения', 'Комментарий', 'Создано', 'Обновлено'],
-    sheet: { getRange: () => ({ setValues: values => { written = values[0]; } }) }
+    sheet: { getRange: (_row, column) => ({ setValue: value => { written[column - 1] = value; } }) }
   };
   const row = { _row: 2, _values: Array(17).fill(''), id: 'P1', dealId: 'D1', employeeId: 'E1', articleCode: 'A', ruleId: 'R', base: 100, rate: 1, share: 1, amount: 100, readyDate: '', status: 'PLANNED', paid: false, paymentDate: '', comment: '', createdAt: '2026-09-03', updatedAt: '2026-09-03' };
   row._values[13] = 'Существующее значение';
   assert.equal(sheets.writePayrollChanges(table, [{ row, changed: true }]), 1);
   assert.equal(written[10], 'Запланировано');
-  assert.equal(written[13], 'Существующее значение');
+  assert.equal(written[13], undefined);
+  assert.equal(row._values[13], 'Существующее значение');
 });
 
 test('handlePaymentEdit записывает «Выплачено»', () => {
