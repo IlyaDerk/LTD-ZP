@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 16px; font: 13px/1.45 Arial, sans-serif; color: #263445; background: #f7f9fc; }
+    h1 { font-size: 20px; margin: 0 0 6px; } h2 { font-size: 14px; margin: 0 0 10px; }
+    p { margin: 6px 0 12px; } .muted { color: #5a6778; font-size: 12px; }
+    section { margin: 14px 0; background: white; border: 1px solid #dde3eb; border-radius: 8px; padding: 12px; }
+    label { display: block; margin: 8px 0 3px; font-weight: 600; }
+    input, select, button { width: 100%; font: inherit; min-height: 36px; border-radius: 5px; }
+    input, select { padding: 6px; border: 1px solid #aab6c5; background: white; }
+    button { cursor: pointer; border: 1px solid #b8c6d6; background: #eef3f9; color: #163a60; margin-top: 9px; padding: 7px; }
+    button.primary { background: #245d94; color: white; border-color: #245d94; }
+    button.danger { background: #92431d; color: white; border-color: #92431d; }
+    button:disabled { opacity: .5; cursor: default; }
+    .dates { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    dl { margin: 0; } .metric { display: flex; justify-content: space-between; gap: 8px; padding: 5px 0; }
+    dt, dd { margin: 0; } dd { font-weight: 600; white-space: nowrap; }
+    .total { border-top: 1px solid #dde3eb; margin-top: 5px; }
+    #message { white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px 0; }
+    #message.error { color: #a32922; } #message.success { color: #196d43; }
+    #confirmation { border-color: #ba784a; } #confirmation[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <h1>Зарплаты</h1>
+  <p class="muted">Выберите статьи на листе «Интерфейс собственника». Флажок не фиксирует выплату.</p>
+  <section>
+    <h2>Фильтры</h2>
+    <div class="dates">
+      <div><label for="from">Дата от</label><input id="from" type="date"></div>
+      <div><label for="to">Дата до</label><input id="to" type="date"></div>
+    </div>
+    <p class="muted">По дате готовности, включительно. При заданном периоде статьи без даты не показываются.</p>
+    <label for="employee">Сотрудник</label><select id="employee"><option value="">Все сотрудники</option></select>
+    <label for="status">Статус</label><select id="status"><option value="">Все статусы</option></select>
+    <label for="object">Объект</label><select id="object"><option value="">Все объекты</option></select>
+    <button id="apply" class="primary">Применить фильтры</button>
+    <button id="reset">Сбросить фильтры</button>
+    <p class="muted">Обновление выдачи сбрасывает выбор невыплаченных статей. Фильтры общие для этого листа.</p>
+  </section>
+  <section>
+    <h2>По текущему фильтру</h2>
+    <dl id="metrics"></dl>
+    <button id="refresh">Обновить выбор</button>
+  </section>
+  <button id="preview" class="primary" disabled>Подтвердить оплату</button>
+  <section id="confirmation" hidden>
+    <h2>Проверьте перед записью</h2>
+    <p id="quote"></p>
+    <p class="muted">Будет зафиксирован факт выплаты, статус «Выплачено» и дата. Это не перевод денег и не отправка в кассу.</p>
+    <button id="confirm" class="danger">Да, зафиксировать выплату</button>
+    <button id="cancel">Отмена</button>
+  </section>
+  <div id="message" role="status" aria-live="polite">Загрузка…</div>
+  <script>
+    'use strict';
+    let version = '', busy = false, quote = null, state = null;
+    const $ = id => document.getElementById(id);
+    const money = value => new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB' }).format(value);
+    const keys = ['from', 'to', 'employee', 'status', 'object'];
+    function message(text, kind = '') { $('message').textContent = text; $('message').className = kind; }
+    function invalidate() { quote = null; $('confirmation').hidden = true; }
+    function controls() {
+      document.querySelectorAll('button').forEach(b => { b.disabled = busy; });
+      $('preview').disabled = busy || !state || state.stale || !state.summary.selectedCount;
+      $('confirm').disabled = busy || !quote;
+    }
+    function call(name, args, success, quiet = false) {
+      if (busy) return;
+      busy = true; controls();
+      if (!quiet) message('Выполняется…');
+      const runner = google.script.run.withSuccessHandler(result => {
+        busy = false; success(result); controls();
+      }).withFailureHandler(error => {
+        busy = false; invalidate(); message(error.message || String(error), 'error'); controls();
+      });
+      runner[name](...args);
+    }
+    function optionList(id, items, first, selected) {
+      const control = $(id); control.replaceChildren(new Option(first, ''));
+      items.forEach(item => control.add(new Option(item.label, item.id)));
+      control.value = selected || '';
+    }
+    function render(result, fillFilters) {
+      if (version && version !== result.version) invalidate();
+      version = result.version; state = result;
+      if (fillFilters) {
+        optionList('employee', result.employees, 'Все сотрудники', result.filters.employee);
+        optionList('object', result.objects, 'Все объекты', result.filters.object);
+        optionList('status', result.statuses.map(s => ({ id: s, label: s })), 'Все статусы', result.filters.status);
+        $('from').value = result.filters.from; $('to').value = result.filters.to;
+      }
+      const summary = result.summary;
+      const metrics = [['Запланировано', money(summary.planned)], ['К оплате', money(summary.toPay)], ['Выплачено', money(summary.paid)], ['Итого по фильтру', money(summary.total)], ['Выбрано статей', String(summary.selectedCount)], ['Сумма выбранных', money(summary.selectedAmount)]];
+      $('metrics').replaceChildren();
+      metrics.forEach(([label, value], i) => {
+        const row = document.createElement('div'); row.className = 'metric' + (i === 3 || i === 4 ? ' total' : '');
+        const dt = document.createElement('dt'), dd = document.createElement('dd');
+        dt.textContent = label; dd.textContent = value; row.append(dt, dd); $('metrics').append(row);
+      });
+      if (result.stale) { invalidate(); message('Исходные статьи изменились. Нажмите «Применить фильтры» и повторите выбор.', 'error'); }
+      else message(summary.count ? 'В выдаче статей: ' + summary.count : 'По выбранным фильтрам статей нет.');
+    }
+    function apply(filters) { invalidate(); call('ownerApplyFilters', [filters], result => render(result, true)); }
+    $('apply').onclick = () => apply(Object.fromEntries(keys.map(k => [k, $(k).value])));
+    $('reset').onclick = () => apply({});
+    $('refresh').onclick = () => { invalidate(); call('ownerGetState', [], result => render(result, true)); };
+    keys.forEach(k => $(k).onchange = () => { invalidate(); controls(); });
+    $('preview').onclick = () => call('ownerPreviewPayment', [version], result => {
+      quote = result; $('quote').textContent = 'Статей: ' + result.count + '. Общая сумма: ' + money(result.amount) + '. ID: ' + result.ids.join(', ');
+      $('confirmation').hidden = false; message('Проверьте сумму и подтвердите факт выплаты.');
+    });
+    $('cancel').onclick = () => { invalidate(); controls(); message('Подтверждение отменено. Статьи не изменены.'); };
+    $('confirm').onclick = () => {
+      if (!quote) return;
+      call('ownerConfirmPayment', [quote.token, version], result => {
+        invalidate(); if (result.state) render(result.state, true);
+        message(result.warning || 'Зафиксировано выплат: ' + result.paidCount + ', сумма ' + money(result.amount), result.warning ? 'error' : 'success');
+      });
+    };
+    call('ownerGetState', [], result => render(result, true));
+    // Poll only selection/state; never perform calculation or payment in the background.
+    setInterval(() => { if (!busy && !quote && version) call('ownerGetState', [version], result => render(result, false), true); }, 6000);
+  </script>
+</body>
+</html>

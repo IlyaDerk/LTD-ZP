@@ -13,7 +13,7 @@ global.readPayrollWorkbook = () => { throw new Error('readPayrollWorkbook stub i
 global.writePayrollChanges = () => { throw new Error('writePayrollChanges stub is not configured'); };
 global.ensurePaymentCheckbox = () => { throw new Error('ensurePaymentCheckbox stub is not configured'); };
 global.LockService = { getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} }) };
-global.SpreadsheetApp = { openById: () => ({}) };
+global.SpreadsheetApp = { getActiveSpreadsheet: () => ({ getId: () => 'TEST' }) };
 global.ScriptApp = { getProjectTriggers: () => [] };
 const main = require('../src/Main');
 
@@ -42,19 +42,8 @@ test('запись выплаты использует русский стату
   assert.equal(row._values[13], 'Существующее значение');
 });
 
-test('handlePaymentEdit записывает «Выплачено»', () => {
-  const writes = [];
-  const sheet = {
-    getName: () => 'Статьи оплаты',
-    getRange: (row, column) => ({
-      getValue: () => column === 2 ? 'К оплате' : '',
-      setValue: value => writes.push({ row, column, value })
-    })
-  };
-  global.tableFromSheet = () => ({ headers: ['ID статьи', 'Статус', 'Оплатить', 'Дата выплаты', 'Обновлено'], headerRow: 0 });
-  const event = { value: 'TRUE', source: { toast: () => {} }, range: { getNumRows: () => 1, getNumColumns: () => 1, getSheet: () => sheet, getColumn: () => 3, getRow: () => 2, setValue: () => {} } };
-  main.handlePaymentEdit(event);
-  assert.equal(writes.find(write => write.column === 2).value, 'Выплачено');
+test('редактирование checkbox в привязанном проекте не подтверждает оплату', () => {
+  assert.equal(main.handlePaymentEdit({ value: 'TRUE' }), false);
 });
 
 test('dailySync возвращает количество и перечень пропущенных сделок', () => {
@@ -78,22 +67,19 @@ test('setup сначала выполняет preflight и при структу
   assert.deepEqual(events, ['preflight']);
 });
 
-test('setup добавляет checkbox после preflight и оставляет ровно по одному целевому триггеру', () => {
-  const events = [], deleted = [], created = [];
-  const trigger = handler => ({ getHandlerFunction: () => handler });
+test('setup только проверяет источник и не создаёт триггеры', () => {
+  const events = [];
   global.readPayrollWorkbook = () => { events.push('preflight'); return {}; };
-  global.ensurePaymentCheckbox = () => { events.push('checkbox'); };
-  global.ScriptApp = {
-    getProjectTriggers: () => [trigger('dailySync'), trigger('dailySync'), trigger('other')],
-    deleteTrigger: item => deleted.push(item.getHandlerFunction()),
-    newTrigger: handler => ({
-      timeBased() { return this; }, everyDays() { return this; }, atHour() { return this; },
-      forSpreadsheet() { return this; }, onEdit() { return this; },
-      create() { created.push(handler); }
-    })
-  };
+  global.ensurePaymentCheckbox = () => { throw new Error('Нельзя менять checkbox'); };
+  global.ScriptApp = { getProjectTriggers: () => { throw new Error('Триггеры не трогать'); } };
   main.setup();
-  assert.deepEqual(events, ['preflight', 'checkbox']);
-  assert.deepEqual(deleted, ['dailySync']);
-  assert.deepEqual(created, ['handlePaymentEdit']);
+  assert.deepEqual(events, ['preflight']);
+});
+
+test('ID контейнера проверяется до чтения и записи', () => {
+  global.SpreadsheetApp = { getActiveSpreadsheet: () => ({ getId: () => 'OTHER' }) };
+  assert.throws(() => main.dailySync(), /ID контейнерной/);
+  global.SpreadsheetApp = { getActiveSpreadsheet: () => null };
+  assert.throws(() => main.setup(), /ID контейнерной/);
+  global.SpreadsheetApp = { getActiveSpreadsheet: () => ({ getId: () => 'TEST' }) };
 });

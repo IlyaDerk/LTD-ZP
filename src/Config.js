@@ -4,6 +4,6 @@ var PAYROLL_CONFIG = Object.freeze({
     deals: 'Выгрузка сделок', employees: 'Справочник сотрудников',
     articleTypes: 'Справочник статей', rules: 'Правила создания статей',
     moscow: 'Матрица Мотив Москва', tambov: 'Матрица Мотив Тамбов',
-    payments: 'Статьи оплаты'
+    payments: 'Статьи оплаты', owner: 'Интерфейс собственника'
   }
 });
