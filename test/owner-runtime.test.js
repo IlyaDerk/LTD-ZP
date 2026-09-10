@@ -4,6 +4,38 @@ const workbook = require('./helpers/owner-workbook');
 const payments = w => JSON.stringify(w.cells('Статьи оплаты'));
 const plain = v => JSON.parse(JSON.stringify(v));
 
+for (const ids of [['PAY-ED36BAC4'], ['PAY-ED36BAC4', 'PAY-8D4056C3']]) {
+  test('после оплаты интерфейс актуален при устаревшем чтении SpreadsheetApp: ' + ids.length + ' статьи', () => {
+    const w = workbook(), state = w.api.ownerGetState();
+    ids.forEach(id => w.select(id));
+    const quote = w.api.ownerPreviewPayment(state.version);
+    // Reproduce the live read-after-write cache: API writes commit, but reads
+    // through SpreadsheetApp still return the pre-payment workbook this execution.
+    const read = w.api.readPayrollWorkbook;
+    let cached;
+    w.api.readPayrollWorkbook = ss => cached || (cached = read(ss));
+    let result;
+    try { result = w.api.ownerConfirmPayment(quote.token, state.version); }
+    finally { w.api.readPayrollWorkbook = read; }
+    assert.equal(result.warning, undefined);
+    assert.equal(result.state.summary.paid, state.summary.paid + quote.amount);
+    assert.equal(result.state.summary.toPay, state.summary.toPay - quote.amount);
+    assert.equal(result.state.summary.selectedCount, 0);
+    ids.forEach(id => {
+      const row = w.cells('Интерфейс собственника').find(r => w.readValue(r?.[0]) === id);
+      assert.equal(w.readValue(row[6]), 'Выплачено');
+      assert.equal(w.readValue(row[7]), true);
+      assert.match(w.readValue(row[8]), /^\d{4}-\d{2}-\d{2}$/);
+    });
+    const fresh = w.api.ownerGetState(result.state.version);
+    assert.equal(fresh.stale, false, 'следующий запрос не должен объявлять собственную оплату внешним изменением');
+    assert.deepEqual(plain(fresh.summary), plain(result.state.summary));
+    const source = payments(w);
+    assert.throws(() => w.api.ownerConfirmPayment(quote.token, result.state.version), /Сначала/);
+    assert.equal(payments(w), source);
+  });
+}
+
 test('реальные адаптеры: checkbox выбирает, preview ничего не оплачивает, одиночная кнопка платит по ID', () => {
   const w = workbook(), state = w.api.ownerGetState();
   const before = payments(w);

@@ -202,7 +202,18 @@ function ownerConfirmPayment(token, version) {
     Sheets.Spreadsheets.batchUpdate({ requests: requests }, ss.getId());
     PropertiesService.getUserProperties().deleteProperty('payroll.owner.preview');
     var receipt = { paidCount: plan.length, amount: PayrollOwnerCore.summary(plan, ctx.selected).selectedAmount, ids: ctx.selected, paidAt: stamp };
-    try { receipt.state = ownerRender_(ss, ownerSource_(ss), ctx.state.filters); }
+    try {
+      // SpreadsheetApp may return its pre-write read cache after a Sheets API
+      // transaction. Render the reread source plus the successfully committed
+      // fields instead of rereading through that cache in the same execution.
+      var paidIds = PayrollOwnerCore.unique(plan);
+      var committed = { table: ctx.source.table, rows: ctx.source.rows.map(function (row) {
+        return paidIds[row.id] ? Object.assign({}, row, {
+          status: 'Выплачено', paid: true, paymentDate: PayrollCore.toIsoDate(today), updatedAt: stamp
+        }) : row;
+      }) };
+      receipt.state = ownerRender_(ss, committed, ctx.state.filters);
+    }
     catch { receipt.warning = 'Оплата подтверждена, но интерфейс не обновился. Обновите его; повторно оплачивать не нужно.'; }
     return receipt;
   });
