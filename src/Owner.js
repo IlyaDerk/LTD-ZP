@@ -36,7 +36,7 @@ function ownerSource_(ss) {
   // Do not silently discard malformed source rows with an amount but without ID.
   if (input.existing.some(function (r) { return !r.id && (r.dealId || r.amount); })) throw new Error('В источнике есть статья без ID');
   PayrollOwnerCore.unique(rows);
-  return { table: input.paymentTable, rows: rows };
+  return { table: input.paymentTable, rows: rows, skippedDeals: input.skippedDeals || [] };
 }
 
 function ownerCell_(sheetId, row, column, value) {
@@ -122,7 +122,7 @@ function ownerResponse_(source, state, selected) {
   var employees = Object.create(null), objects = Object.create(null);
   source.rows.forEach(function (r) { employees[r.employeeId] = r.employee; objects[r.objectKey] = r.object; });
   function options(map) { return Object.keys(map).map(function (id) { return { id: id, label: map[id] }; }).sort(function (a, b) { return a.label.localeCompare(b.label, 'ru'); }); }
-  return { version: state.version, filters: state.filters, summary: view.summary, employees: options(employees), objects: options(objects), statuses: PayrollOwnerCore.statuses, stale: state.sourceHash !== ownerHash_(PayrollOwnerCore.fingerprint(source.rows)) };
+  return { version: state.version, filters: state.filters, summary: view.summary, employees: options(employees), objects: options(objects), statuses: PayrollOwnerCore.statuses, skippedDeals: source.skippedDeals || [], stale: state.sourceHash !== ownerHash_(PayrollOwnerCore.fingerprint(source.rows)) };
 }
 
 function ownerContext_(ss, version) {
@@ -207,7 +207,7 @@ function ownerConfirmPayment(token, version) {
       // transaction. Render the reread source plus the successfully committed
       // fields instead of rereading through that cache in the same execution.
       var paidIds = PayrollOwnerCore.unique(plan);
-      var committed = { table: ctx.source.table, rows: ctx.source.rows.map(function (row) {
+      var committed = { table: ctx.source.table, skippedDeals: ctx.source.skippedDeals || [], rows: ctx.source.rows.map(function (row) {
         return paidIds[row.id] ? Object.assign({}, row, {
           status: 'Выплачено', paid: true, paymentDate: PayrollCore.toIsoDate(today), updatedAt: stamp
         }) : row;

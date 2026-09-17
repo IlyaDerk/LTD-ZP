@@ -17,8 +17,9 @@ function dailySync() {
   return withPayrollLock(function () {
     var data = readPayrollWorkbook(getPayrollSpreadsheet_());
     var calculation = PayrollCore.calculate(data);
-    var results = PayrollCore.reconcile(data.existing, calculation.rows, new Date().toISOString());
+    var results = PayrollCore.reconcile(data.existing, calculation.rows, new Date().toISOString(), calculation.skippedDeals);
     var count = writePayrollChanges(data.paymentTable, results);
+    writePayrollDiagnostics(data.dealTable, calculation.skippedDeals);
     console.info('dailySync: рассчитано ' + calculation.rows.length + ', записано ' + count + ', пропущено сделок ' + calculation.skippedDeals.length);
     return { calculated: calculation.rows.length, written: count, skipped: calculation.skippedDeals.length, skippedDeals: calculation.skippedDeals };
   });

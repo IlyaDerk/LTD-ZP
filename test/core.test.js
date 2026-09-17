@@ -52,6 +52,73 @@ test('ошибка пропускает всю сделку без диагно�
   assert.equal(JSON.stringify(result).includes('NEEDS_REVIEW'), false);
 });
 
+test('все нулевые статьи отклоняют сделку целиком и попадают в подробную диагностику', () => {
+  const deal = f.deal({ id: 'ZERO', objectName: 'Нулевая сделка', projectCost: 1 });
+  const { result, warnings } = captureCalculation(f.input(deal));
+  assert.equal(result.rows.length, 0);
+  assert.equal(result.skippedDeals.length, 1);
+  const skipped = result.skippedDeals[0];
+  assert.equal(skipped.cleanupExisting, true);
+  assert.equal(skipped.dealName, 'Нулевая сделка');
+  assert.equal(skipped.projectCost, 1);
+  assert.equal(skipped.articles.length, 3);
+  assert.equal(skipped.nonPositiveArticles.length, 3);
+  assert.ok(skipped.nonPositiveArticles.every(row => row.amount === 0));
+  assert.match(warnings[0], /ZERO/);
+  assert.match(warnings[0], /Нулевая сделка/);
+  assert.match(warnings[0], /Стоимость сделки: 1 ₽/);
+  assert.match(warnings[0], /По сделке ничего не записано/);
+});
+
+test('одна нулевая статья среди положительных отклоняет весь комплект', () => {
+  const rules = f.rules.map(rule => rule.id === 'R_2_PART_1' ? { ...rule, share: .999 } : rule.id === 'R_2_PART_2' ? { ...rule, share: .001 } : rule);
+  const result = captureCalculation(f.input(f.deal({ id: 'MIXED', projectCost: 100 }), { rules })).result;
+  assert.equal(result.rows.length, 0);
+  assert.equal(result.skippedDeals.length, 1);
+  assert.deepEqual(result.skippedDeals[0].articles.map(row => row.amount), [45, 0, 10]);
+  assert.deepEqual(result.skippedDeals[0].nonPositiveArticles.map(row => row.amount), [0]);
+});
+
+test('защитная проверка отклоняет отрицательную и нечисловую сумму', () => {
+  const result = core.validateCalculatedArticles([
+    { ruleId: 'R_2_PART_1', articleCode: 'DESIGN_PART_1', amount: -1 },
+    { ruleId: 'R_2_PART_2', articleCode: 'DESIGN_PART_2', amount: Number.NaN },
+    { ruleId: 'R_REPAIR_MSK_DESIGNER', articleCode: 'REPAIR_BONUS_DESIGNER', amount: 10 }
+  ]);
+  assert.equal(result.invalid.length, 2);
+  assert.match(result.reasons.join(' '), /-1 ₽/);
+  assert.match(result.reasons.join(' '), /нечисловая сумма/);
+});
+
+test('неположительная сделка не мешает корректной сделке', () => {
+  const bad = f.deal({ id: 'ZERO', projectCost: 1 });
+  const good = f.deal({ id: 'GOOD' });
+  const result = captureCalculation(f.input(bad, { deals: [bad, good] })).result;
+  assert.equal(result.skippedDeals.length, 1);
+  assert.ok(result.rows.length > 0);
+  assert.ok(result.rows.every(row => row.dealId === 'GOOD'));
+});
+
+test('сверка удаляет только изменяемые неоплаченные статьи и после исправления остаётся идемпотентной', () => {
+  const invalid = captureCalculation(f.input(f.deal({ id: 'FIX', projectCost: 1 }))).result;
+  const legacy = [
+    { id: 'OLD-PLAN', naturalKey: 'FIX|R_2_PART_1|DESIGN_PART_1|engineer', dealId: 'FIX', status: 'PLANNED', _row: 10 },
+    { id: 'OLD-PAY', naturalKey: 'FIX|R_2_PART_2|DESIGN_PART_2|engineer', dealId: 'FIX', status: 'TO_PAY', _row: 11 },
+    { id: 'OLD-PAID', naturalKey: 'FIX|R_REPAIR_MSK_DESIGNER|REPAIR_BONUS_DESIGNER|engineer', dealId: 'FIX', status: 'PAID', paid: true, amount: 1, _row: 12 }
+  ];
+  const cleanup = core.reconcile(legacy, invalid.rows, '2026-09-16T10:00:00Z', invalid.skippedDeals);
+  assert.deepEqual(cleanup.filter(row => row.remove).map(row => row.row.id), ['OLD-PLAN', 'OLD-PAY']);
+  assert.equal(cleanup.some(row => row.row.id === 'OLD-PAID'), false);
+
+  const corrected = core.calculate(f.input(f.deal({ id: 'FIX', projectCost: 200000 })));
+  const first = core.reconcile([legacy[2]], corrected.rows, '2026-09-17T10:00:00Z', corrected.skippedDeals);
+  assert.ok(first.some(row => row.row.id === 'OLD-PAID' && !row.changed));
+  assert.ok(first.some(row => row.changed));
+  const current = first.map(row => row.row);
+  const second = core.reconcile(current, corrected.rows, '2026-09-18T10:00:00Z', corrected.skippedDeals);
+  assert.ok(second.every(row => !row.changed));
+});
+
 test('ошибочная сделка не мешает рассчитать остальные', () => {
   const bad = f.deal({ id: 'BAD', engineer: 'Неизвестный' });
   const good = f.deal({ id: 'GOOD' });
@@ -60,6 +127,28 @@ test('ошибочная сделка не мешает рассчитать о�
   assert.equal(result.skippedDeals[0].dealId, 'BAD');
   assert.ok(result.rows.length > 0);
   assert.ok(result.rows.every(row => row.dealId === 'GOOD'));
+});
+
+test('пустой ID отклоняет только свою сделку, а пустые даты оставляют корректные статьи запланированными', () => {
+  const bad = f.deal({ id: '' });
+  const good = f.deal({ id: 'GOOD-PLANNED', act1: '', act2: '', act3: '', repairDate: '' });
+  const result = captureCalculation(f.input(bad, { deals: [bad, good] })).result;
+  assert.equal(result.skippedDeals.length, 1);
+  assert.equal(result.skippedDeals[0].dealId, '');
+  assert.match(result.skippedDeals[0].reasons.join(' '), /ID сделки/);
+  assert.ok(result.rows.length > 0);
+  assert.ok(result.rows.every(row => row.dealId === 'GOOD-PLANNED' && row.status === 'PLANNED' && row.readyDate === ''));
+});
+
+test('пустой ID сотрудника в справочнике отклоняет только затронутую сделку', () => {
+  const employees = f.employees.map(employee => employee.id === 'M1' ? { ...employee, id: '' } : employee);
+  const bad = f.deal({ id: 'BAD-EMPLOYEE-ID' });
+  const good = f.deal({ id: 'GOOD-EMPLOYEE-ID', engineer: 'Иван Тамбов', projectCost: 200000, area: 80, package: 'Инженерный' });
+  const result = captureCalculation(f.input(bad, { deals: [bad, good], employees })).result;
+  assert.equal(result.skippedDeals.length, 1);
+  assert.equal(result.skippedDeals[0].dealId, 'BAD-EMPLOYEE-ID');
+  assert.match(result.skippedDeals[0].reasons.join(' '), /ID сотрудника/);
+  assert.ok(result.rows.some(row => row.dealId === 'GOOD-EMPLOYEE-ID'));
 });
 
 test('для пропущенной сделки собираются все причины', () => {

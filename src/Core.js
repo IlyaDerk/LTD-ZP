@@ -70,6 +70,7 @@ var PayrollCore = (function () {
     var result = findEmployee(rows, name, date);
     if (result.error) { addError(errors, result.error); return null; }
     var employee = result.value, model = norm(employee.model);
+    if (!norm(employee.id)) addError(errors, 'Для сотрудника «' + name + '» не указан ID сотрудника');
     if (model !== 'москва' && model !== 'тамбов') addError(errors, 'Для сотрудника «' + name + '» не указана поддерживаемая модель мотивации');
     if (!norm(employee.grade)) addError(errors, 'Для сотрудника «' + name + '» не указан грейд');
     return employee;
@@ -103,6 +104,7 @@ var PayrollCore = (function () {
   }
   function calculateDeal(input, deal, now) {
     var errors = [], items = [], s = structure(deal);
+    if (!norm(deal.id)) addError(errors, 'Не указан ID сделки');
     if (!norm(deal.engineer)) addError(errors, 'Не указан инженер-дизайнер');
     if (!s) addError(errors, 'Заполните поле «Визуализатор / Нет»: «Нет» для двух актов или однозначное ФИО для трёх актов');
     if (!s) return { rows: [], reasons: errors };
@@ -123,25 +125,73 @@ var PayrollCore = (function () {
     });
     return errors.length ? { rows: [], reasons: errors } : { rows: items, reasons: [] };
   }
-  function calculate(input) {
-    var out = [], skippedDeals = [], now = iso(input.now || new Date());
-    input.deals.forEach(function (deal) {
-      var result = calculateDeal(input, deal, now);
-      if (result.reasons.length) {
-        var skipped = { dealId: String(deal.id), reasons: result.reasons };
-        skippedDeals.push(skipped);
-        if (typeof console !== 'undefined' && console.warn) console.warn('Сделка ' + skipped.dealId + ' пропущена: ' + skipped.reasons.join('; '));
-        return;
-      }
-      Array.prototype.push.apply(out, result.rows);
+  function articleName(row) {
+    var names = {
+      R_2_PART_1: 'Акт 1', R_2_PART_2: 'Акт 2',
+      R_3_SAME_PART_1: 'Акты 1 и 2', R_3_SAME_PART_2: 'Акт 3',
+      R_3_SPLIT_ENGINEERING: 'Инженерная часть', R_3_SPLIT_VISUAL_3D: '3D-визуализация',
+      R_3_SPLIT_COLLAGE: 'Коллажи', R_TAMBOV_ROLLOUTS: 'Развёртки',
+      R_REPAIR_MSK_DESIGNER: 'Бонус за ремонт', R_REPAIR_TMB_DESIGNER: 'Бонус за ремонт'
+    };
+    return names[row.ruleId] || row.articleCode || row.ruleId || 'Статья';
+  }
+  function amountText(value) { return Number.isFinite(value) ? String(value) + ' ₽' : 'нечисловая сумма'; }
+  function articleDetails(rows) {
+    return rows.map(function (row) {
+      return { name: articleName(row), articleCode: row.articleCode, ruleId: row.ruleId, amount: Number.isFinite(row.amount) ? row.amount : null, amountText: amountText(row.amount) };
     });
+  }
+  function allocateAmounts(rows) {
     var groups = {};
-    out.forEach(function (x) { var k = x.dealId + '|' + x.employeeId + '|' + x.fund; (groups[k] || (groups[k] = [])).push(x); });
+    rows.forEach(function (x) { var k = x.employeeId + '|' + x.fund; (groups[k] || (groups[k] = [])).push(x); });
     Object.keys(groups).forEach(function (k) {
       var xs = groups[k].sort(function (a, b) { return a.ruleId.localeCompare(b.ruleId); });
       if (xs.length > 1 && Math.abs(xs.reduce(function (sum, x) { return sum + x.share; }, 0) - 1) < 1e-9) {
         var rest = 0; for (var i = 1; i < xs.length; i += 1) { xs[i].amount = Math.floor(xs[i].fund * xs[i].share); rest += xs[i].amount; } xs[0].amount = xs[0].fund - rest;
       } else xs.forEach(function (x) { x.amount = Math.round(x.fund * x.share); });
+    });
+    return rows;
+  }
+  function validateCalculatedArticles(rows) {
+    var invalid = rows.filter(function (row) { return !Number.isFinite(row.amount) || row.amount <= 0; });
+    return {
+      invalid: invalid,
+      reasons: invalid.map(function (row) { return 'Расчёт сформировал неположительную статью «' + articleName(row) + '» — ' + amountText(row.amount); })
+    };
+  }
+  function skippedDeal(deal, rows, reasons, cleanupExisting) {
+    var validation = validateCalculatedArticles(rows);
+    return {
+      dealId: String(deal.id), dealName: String(deal.objectName || ''), projectCost: Number(deal.projectCost),
+      articles: articleDetails(rows), nonPositiveArticles: articleDetails(validation.invalid),
+      reasons: reasons.slice(), cleanupExisting: cleanupExisting === true
+    };
+  }
+  function warningText(skipped) {
+    var articles = skipped.articles.length ? skipped.articles.map(function (x) { return '«' + x.name + '» — ' + x.amountText; }).join(', ') : 'не сформированы';
+    return 'Сделка ' + skipped.dealId + (skipped.dealName ? ' «' + skipped.dealName + '»' : '') +
+      ' пропущена. Стоимость сделки: ' + amountText(skipped.projectCost) + '. Рассчитанные статьи: ' + articles +
+      '. Причина: ' + skipped.reasons.join('; ') + '. По сделке ничего не записано.';
+  }
+  function calculate(input) {
+    var out = [], skippedDeals = [], now = iso(input.now || new Date());
+    input.deals.forEach(function (deal) {
+      var result = calculateDeal(input, deal, now);
+      if (result.reasons.length) {
+        var skipped = skippedDeal(deal, result.rows, result.reasons, false);
+        skippedDeals.push(skipped);
+        if (typeof console !== 'undefined' && console.warn) console.warn(warningText(skipped));
+        return;
+      }
+      allocateAmounts(result.rows);
+      var validation = validateCalculatedArticles(result.rows);
+      if (validation.reasons.length) {
+        var amountSkipped = skippedDeal(deal, result.rows, validation.reasons, true);
+        skippedDeals.push(amountSkipped);
+        if (typeof console !== 'undefined' && console.warn) console.warn(warningText(amountSkipped));
+        return;
+      }
+      Array.prototype.push.apply(out, result.rows);
     });
     return { rows: out, skippedDeals: skippedDeals };
   }
@@ -149,25 +199,33 @@ var PayrollCore = (function () {
     var keys = ['id', 'dealId', 'employeeId', 'articleCode', 'ruleId', 'base', 'rate', 'share', 'amount', 'readyDate', 'status', 'paid', 'paymentDate', 'comment'];
     var c = {}; keys.forEach(function (k) { c[k] = x[k] == null ? '' : x[k]; }); return JSON.stringify(c);
   }
-  function reconcile(existing, calculated, now) {
+  function reconcile(existing, calculated, now, skippedDeals) {
     var byId = {}, byKey = {}; existing.forEach(function (x) {
       if (byId[x.id]) throw new Error('Дублирующий ID статьи: ' + x.id);
       if (x.naturalKey && byKey[x.naturalKey]) throw new Error('Дублирующий ключ статьи: ' + x.naturalKey);
       byId[x.id] = x; if (x.naturalKey) byKey[x.naturalKey] = x;
     });
-    return calculated.map(function (next) {
+    var results = calculated.map(function (next) {
       var old = byId[next.id] || byKey[next.naturalKey];
       if (old && (old.status === STATUS.PAID || old.status === STATUS.CANCELLED)) return { row: old, changed: false };
       if (old) next = Object.assign({}, next, { id: old.id, paid: old.paid, paymentDate: old.paymentDate, comment: old.comment });
       if (old && comparable(old) === comparable(Object.assign({}, next, { createdAt: old.createdAt, updatedAt: old.updatedAt }))) return { row: old, changed: false };
       return { row: Object.assign({}, next, { _row: old && old._row, _values: old && old._values, _formulas: old && old._formulas, id: old ? old.id : next.id, createdAt: old ? old.createdAt : now, updatedAt: now }), changed: true };
     });
+    var cleanup = Object.create(null);
+    (skippedDeals || []).forEach(function (deal) { if (deal.cleanupExisting) cleanup[String(deal.dealId)] = true; });
+    existing.forEach(function (old) {
+      if (cleanup[String(old.dealId)] && (old.status === STATUS.PLANNED || old.status === STATUS.TO_PAY)) {
+        results.push({ row: old, changed: true, remove: true });
+      }
+    });
+    return results;
   }
   function pay(row, date) {
     if (row.status !== STATUS.TO_PAY || row.paid) return { ok: false, reason: 'Оплата разрешена только один раз для статьи TO_PAY', row: row };
     return { ok: true, row: Object.assign({}, row, { status: STATUS.PAID, paid: true, paymentDate: iso(date), updatedAt: iso(date) }) };
   }
-  return { STATUS: STATUS, normalize: norm, toIsoDate: iso, calculate: calculate, reconcile: reconcile, pay: pay };
+  return { STATUS: STATUS, normalize: norm, toIsoDate: iso, calculate: calculate, reconcile: reconcile, pay: pay, validateCalculatedArticles: validateCalculatedArticles };
 }());
 
 if (typeof module !== 'undefined') module.exports = PayrollCore;

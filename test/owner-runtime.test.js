@@ -129,6 +129,36 @@ test('dailySync сохраняет PAID после подтверждения и
   assert.equal(payments(w), before);
 });
 
+test('dailySync удаляет прежние нулевые неоплаченные статьи, сохраняет PAID и после исправления идемпотентен', () => {
+  const w = workbook(), dealId = '32225537';
+  w.cells('Выгрузка сделок')[4][20].note = 'Комментарий пользователя';
+  w.value('Выгрузка сделок', 5, 8, 1);
+  const rejected = w.api.dailySync();
+  assert.equal(rejected.skipped, 1);
+  assert.equal(rejected.written, 3);
+  const afterReject = w.cells('Статьи оплаты').filter(row => String(w.readValue(row?.[1])) === dealId);
+  assert.equal(afterReject.length, 1);
+  assert.equal(w.readValue(afterReject[0][10]), 'Выплачено');
+  const note = w.cells('Выгрузка сделок')[4][20].note;
+  assert.match(note, /^Комментарий пользователя/);
+  assert.equal((note.match(/--- Расчёт зарплаты: начало ---/g) || []).length, 1);
+  const sidebar = w.api.ownerGetState();
+  assert.equal(sidebar.skippedDeals.length, 1);
+  assert.equal(sidebar.skippedDeals[0].dealId, dealId);
+
+  w.value('Выгрузка сделок', 5, 8, 200000);
+  const corrected = w.api.dailySync();
+  assert.equal(corrected.skipped, 0);
+  assert.equal(corrected.written, 2);
+  assert.equal(w.cells('Выгрузка сделок')[4][20].note, 'Комментарий пользователя');
+  const current = w.cells('Статьи оплаты').filter(row => String(w.readValue(row?.[1])) === dealId);
+  assert.equal(current.length, 3);
+  assert.ok(current.every(row => Number(w.readValue(row[8])) > 0));
+  const beforeRepeat = payments(w);
+  assert.equal(w.api.dailySync().written, 0);
+  assert.equal(payments(w), beforeRepeat);
+});
+
 test('меню и sidebar принадлежат привязанному проекту и не создают триггеры', () => {
   const w = workbook(), events = [];
   w.api.SpreadsheetApp.getUi = () => ({ createMenu: name => ({ addItem(label, handler) { events.push([name, label, handler]); return this; }, addToUi() {} }), showSidebar: html => events.push(html) });

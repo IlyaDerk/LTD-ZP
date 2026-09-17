@@ -23,11 +23,20 @@
     #message { white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px 0; }
     #message.error { color: #a32922; } #message.success { color: #196d43; }
     #confirmation { border-color: #ba784a; } #confirmation[hidden] { display: none; }
+    #skipped { border-color: #d79a79; background: #fff8f3; }
+    #skipped[hidden] { display: none; }
+    .skipped-deal { border-top: 1px solid #efd7c8; padding-top: 8px; margin-top: 8px; }
+    .skipped-deal:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
+    .skipped-deal p { margin: 3px 0; overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
   <h1>Зарплаты</h1>
   <p class="muted">Выберите статьи на листе «Интерфейс собственника». Флажок не фиксирует выплату.</p>
+  <section id="skipped" hidden>
+    <h2 id="skipped-title">Пропущенные сделки</h2>
+    <div id="skipped-list"></div>
+  </section>
   <section>
     <h2>Фильтры</h2>
     <div class="dates">
@@ -85,6 +94,29 @@
       items.forEach(item => control.add(new Option(item.label, item.id)));
       control.value = selected || '';
     }
+    function appendText(parent, tag, value, className) {
+      const element = document.createElement(tag);
+      if (className) element.className = className;
+      element.textContent = String(value == null ? '' : value);
+      parent.append(element);
+      return element;
+    }
+    function renderSkipped(items) {
+      const section = $('skipped'), list = $('skipped-list'), deals = Array.isArray(items) ? items : [];
+      list.replaceChildren(); section.hidden = deals.length === 0;
+      $('skipped-title').textContent = 'Пропущенные сделки: ' + deals.length;
+      deals.forEach(deal => {
+        const card = document.createElement('div'); card.className = 'skipped-deal';
+        appendText(card, 'p', 'ID: ' + deal.dealId + '. ' + (deal.dealName || 'Без названия'));
+        appendText(card, 'p', 'Стоимость: ' + (typeof deal.projectCost === 'number' && Number.isFinite(deal.projectCost) ? money(deal.projectCost) : 'некорректная сумма'));
+        const articles = Array.isArray(deal.articles) && deal.articles.length
+          ? deal.articles.map(item => (item.name || item.articleCode || item.ruleId || 'Статья') + ' — ' + item.amountText).join('; ')
+          : 'не сформированы';
+        appendText(card, 'p', 'Рассчитанные статьи: ' + articles);
+        appendText(card, 'p', 'Причины: ' + (Array.isArray(deal.reasons) ? deal.reasons.join('; ') : ''), 'muted');
+        list.append(card);
+      });
+    }
     function render(result, fillFilters) {
       if (version && version !== result.version) invalidate();
       version = result.version; state = result;
@@ -95,6 +127,7 @@
         $('from').value = result.filters.from; $('to').value = result.filters.to;
       }
       const summary = result.summary;
+      renderSkipped(result.skippedDeals);
       const metrics = [['Запланировано', money(summary.planned)], ['К оплате', money(summary.toPay)], ['Выплачено', money(summary.paid)], ['Итого по фильтру', money(summary.total)], ['Выбрано статей', String(summary.selectedCount)], ['Сумма выбранных', money(summary.selectedAmount)]];
       $('metrics').replaceChildren();
       metrics.forEach(([label, value], i) => {

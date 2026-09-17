@@ -21,21 +21,34 @@ module.exports = function workbook() {
     cell.value = { [typeof v === 'number' ? 'numberValue' : typeof v === 'boolean' ? 'boolValue' : 'stringValue']: v };
     cell.effective = cell.value;
   }
-  function range(name, row, col) {
-    const r = { setValue(v) { value(name, row, col, v); return r; } };
+  function range(name, row, col, numRows = 1, numCols = 1) {
+    const r = {
+      setValue(v) { value(name, row, col, v); return r; },
+      setValues(values) { values.forEach((line, ri) => line.forEach((v, ci) => value(name, row + ri, col + ci, v))); return r; },
+      getNote() { return data[name][row - 1]?.[col - 1]?.note || ''; },
+      setNote(note) { const cell = ((data[name][row - 1] ||= [])[col - 1] ||= {}); cell.note = note; return r; },
+      insertCheckboxes() {
+        for (let ri = 0; ri < numRows; ri += 1) for (let ci = 0; ci < numCols; ci += 1) {
+          const cell = ((data[name][row - 1 + ri] ||= [])[col - 1 + ci] ||= {}); cell.validation = { condition: { type: 'BOOLEAN' } };
+        }
+        return r;
+      }
+    };
     ['setBackground', 'setFontWeight', 'setWrap', 'setFontSize', 'setNumberFormat'].forEach(k => { r[k] = () => r; });
     return r;
   }
   function sheet(name) {
     if (!data[name]) return null;
     return {
-      getName: () => name, getSheetId: () => meta[name].id, getMaxRows: () => meta[name].rows,
+      getName: () => name, getSheetId: () => meta[name].id, getParent: () => ss, getMaxRows: () => meta[name].rows,
       getLastRow: () => data[name].reduce((last, r, i) => r.some(c => c?.value && Object.keys(c.value).length && readValue(c) !== '') ? i + 1 : last, 0),
       getDataRange: () => ({
         getValues: () => { const width = Math.max(10, ...Array.from(data[name], r => r?.length || 0)); return Array.from({ length: Math.max(1, data[name].length) }, (_, ri) => Array.from({ length: width }, (_, i) => readValue(data[name][ri]?.[i]))); },
-        getFormulas: () => { const width = Math.max(10, ...Array.from(data[name], r => r?.length || 0)); return Array.from({ length: Math.max(1, data[name].length) }, (_, ri) => Array.from({ length: width }, (_, i) => data[name][ri]?.[i]?.value?.formulaValue || '')); }
+        getFormulas: () => { const width = Math.max(10, ...Array.from(data[name], r => r?.length || 0)); return Array.from({ length: Math.max(1, data[name].length) }, (_, ri) => Array.from({ length: width }, (_, i) => data[name][ri]?.[i]?.value?.formulaValue || '')); },
+        getNotes: () => { const width = Math.max(10, ...Array.from(data[name], r => r?.length || 0)); return Array.from({ length: Math.max(1, data[name].length) }, (_, ri) => Array.from({ length: width }, (_, i) => data[name][ri]?.[i]?.note || '')); }
       }),
-      getRange: (r, c) => range(name, r, c),
+      getRange: (r, c, nr, nc) => range(name, r, c, nr, nc),
+      deleteRow: row => { data[name].splice(row - 1, 1); },
       setColumnWidths() {}, setColumnWidth() {}, setFrozenRows() {}, hideColumns() {},
       isRowHiddenByUser: row => !!hidden[name][row]
     };
@@ -82,6 +95,9 @@ module.exports = function workbook() {
             hidden[name][d.range.startIndex + 1] = d.properties.hiddenByUser;
           } else if (request.appendDimension) {
             const d = request.appendDimension, name = Object.keys(meta).find(n => meta[n].id === d.sheetId); meta[name].rows += d.length;
+          } else if (request.deleteDimension) {
+            const d = request.deleteDimension.range, name = Object.keys(meta).find(n => meta[n].id === d.sheetId);
+            data[name].splice(d.startIndex, d.endIndex - d.startIndex); meta[name].rows -= d.endIndex - d.startIndex;
           }
         }
       } catch (error) { data = old; throw error; }

@@ -12,12 +12,12 @@ module.exports = [
         SpreadsheetApp: 'readonly', ScriptApp: 'readonly', LockService: 'readonly',
         Utilities: 'readonly', console: 'readonly', PayrollCore: 'readonly',
         PAYROLL_CONFIG: 'readonly', readPayrollWorkbook: 'readonly',
-        writePayrollChanges: 'readonly', tableFromSheet: 'readonly', status: 'readonly',
+        writePayrollChanges: 'readonly', writePayrollDiagnostics: 'readonly', tableFromSheet: 'readonly', status: 'readonly',
         displayStatus: 'readonly', ensurePaymentCheckbox: 'readonly',
         Sheets: 'readonly', HtmlService: 'readonly', PropertiesService: 'readonly',
         PayrollOwnerCore: 'readonly', getPayrollSpreadsheet_: 'readonly', withPayrollLock: 'readonly'
       }
     },
-    rules: { 'no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^(PAYROLL_CONFIG|dailySync|handlePaymentEdit|setup|readPayrollWorkbook|writePayrollChanges|ensurePaymentCheckbox|ensureSingleTrigger)$' }] }
+    rules: { 'no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^(PAYROLL_CONFIG|dailySync|handlePaymentEdit|setup|readPayrollWorkbook|writePayrollChanges|writePayrollDiagnostics|ensurePaymentCheckbox|ensureSingleTrigger)$' }] }
   }
 ];

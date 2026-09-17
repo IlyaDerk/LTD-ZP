@@ -23,26 +23,46 @@ function workbook() {
     }
     return v.stringValue ?? v.numberValue ?? v.boolValue ?? '';
   };
-  const ss = { getSpreadsheetTimeZone: () => 'Europe/Moscow', getSheetByName(name) {
+  const ids = Object.fromEntries(Object.keys(data).map((name, index) => [name, index + 1]));
+  const ss = { getId: () => 'ROUNDTRIP', getSpreadsheetTimeZone: () => 'Europe/Moscow', getSheetByName(name) {
     const rows = data[name];
     if (!rows) return null;
     const width = Math.max(...rows.map(r => r.length));
     return {
+      getSheetId: () => ids[name], getParent: () => ss, getMaxRows: () => Math.max(rows.length, 1000),
       getDataRange: () => ({
         getValues: () => rows.map(row => Array.from({ length: width }, (_, i) => readValue(row[i] || {}))),
-        getFormulas: () => rows.map(row => Array.from({ length: width }, (_, i) => row[i]?.value?.formulaValue || ''))
+        getFormulas: () => rows.map(row => Array.from({ length: width }, (_, i) => row[i]?.value?.formulaValue || '')),
+        getNotes: () => rows.map(row => Array.from({ length: width }, (_, i) => row[i]?.note || ''))
       }),
-      getLastRow: () => rows.length,
-      getRange: (row, column) => ({ setValue(value) {
-        const cell = rows[row - 1][column - 1] ||= {};
-        writes.push([name, row, column]);
-        if (cell.format?.numberFormat?.type === 'DATE' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
-          cell.value = { numberValue: (Date.parse(value + 'T00:00:00Z') - Date.UTC(1899, 11, 30)) / 86400000 };
-        } else cell.value = { [typeof value === 'number' ? 'numberValue' : typeof value === 'boolean' ? 'boolValue' : 'stringValue']: value };
-        cell.effective = cell.value;
-      } })
+      getLastRow: () => rows.reduce((last, row, index) => row.some(cell => readValue(cell) !== '') ? index + 1 : last, 0)
     };
   } };
+  global.Sheets = { Spreadsheets: { batchUpdate(body, id) {
+    assert.equal(id, ss.getId());
+    const working = structuredClone(data);
+    for (const request of body.requests) {
+      if (request.updateCells) {
+        const update = request.updateCells, name = Object.keys(ids).find(key => ids[key] === update.range.sheetId);
+        update.rows.forEach((line, ri) => line.values.forEach((value, ci) => {
+          const row = update.range.startRowIndex + ri, column = update.range.startColumnIndex + ci;
+          const cell = ((working[name][row] ||= [])[column] ||= {});
+          cell.value = structuredClone(value.userEnteredValue || {}); cell.effective = cell.value;
+          writes.push([name, row + 1, column + 1]);
+        }));
+      } else if (request.setDataValidation) {
+        const validation = request.setDataValidation, name = Object.keys(ids).find(key => ids[key] === validation.range.sheetId);
+        ((working[name][validation.range.startRowIndex] ||= [])[validation.range.startColumnIndex] ||= {}).validation = structuredClone(validation.rule);
+      } else if (request.appendDimension) {
+        const append = request.appendDimension, name = Object.keys(ids).find(key => ids[key] === append.sheetId);
+        for (let i = 0; i < append.length; i += 1) working[name].push([]);
+      } else if (request.deleteDimension) {
+        const deletion = request.deleteDimension.range, name = Object.keys(ids).find(key => ids[key] === deletion.sheetId);
+        working[name].splice(deletion.startIndex, deletion.endIndex - deletion.startIndex);
+      }
+    }
+    Object.keys(data).forEach(name => { data[name].splice(0, data[name].length, ...working[name]); });
+  } } };
   function sync(now) {
     const input = sheets.readPayrollWorkbook(ss);
     const calculated = core.calculate(input);

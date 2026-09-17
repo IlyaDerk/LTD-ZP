@@ -19,3 +19,14 @@ test('sidebar использует google.script.run и отдельное яв�
   assert.match(html, /Да, зафиксировать выплату/);
   assert.doesNotMatch(script, /innerHTML/);
 });
+
+test('пропущенные сделки выводятся безопасно без интерпретации HTML', () => {
+  assert.match(html, /Пропущенные сделки/);
+  assert.match(script, /function renderSkipped/);
+  assert.match(script, /element\.textContent = String/);
+  assert.doesNotMatch(script, /innerHTML|insertAdjacentHTML|document\.write/);
+  const malicious = '<img src=x onerror=alert(1)><script>alert(2)</script>';
+  const target = { textContent: '' };
+  target.textContent = String(malicious);
+  assert.equal(target.textContent, malicious, 'значение должно остаться текстом, а не разметкой');
+});
