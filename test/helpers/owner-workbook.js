@@ -9,7 +9,7 @@ module.exports = function workbook() {
   const calls = [], documentProperties = {}, userProperties = {};
   const meta = {}, hidden = {};
   data['Интерфейс собственника'] = [];
-  Object.keys(data).forEach((name, i) => { meta[name] = { id: i + 1, rows: Math.max(data[name].length, 1000) }; hidden[name] = {}; });
+  Object.keys(data).forEach((name, i) => { meta[name] = { id: i + 1, rows: Math.max(data[name].length, 1000), widths: {}, hiddenColumns: {}, frozenRows: 0 }; hidden[name] = {}; });
   const cells = name => data[name];
   function readValue(cell = {}) {
     const v = cell.effective || cell.value || {};
@@ -23,6 +23,8 @@ module.exports = function workbook() {
   }
   function range(name, row, col, numRows = 1, numCols = 1) {
     const r = {
+      getSheet: () => sheet(name), getRow: () => row, getColumn: () => col,
+      getNumRows: () => numRows, getNumColumns: () => numCols,
       setValue(v) { value(name, row, col, v); return r; },
       setValues(values) { values.forEach((line, ri) => line.forEach((v, ci) => value(name, row + ri, col + ci, v))); return r; },
       getNote() { return data[name][row - 1]?.[col - 1]?.note || ''; },
@@ -35,7 +37,7 @@ module.exports = function workbook() {
         return r;
       }
     };
-    ['setBackground', 'setFontWeight', 'setWrap', 'setFontSize', 'setNumberFormat'].forEach(k => { r[k] = () => r; });
+    ['setBackground', 'setFontColor', 'setFontWeight', 'setWrap', 'setFontSize', 'setNumberFormat', 'setHorizontalAlignment', 'setVerticalAlignment'].forEach(k => { r[k] = () => r; });
     return r;
   }
   function sheet(name) {
@@ -50,7 +52,10 @@ module.exports = function workbook() {
       }),
       getRange: (r, c, nr, nc) => range(name, r, c, nr, nc),
       deleteRow: row => { data[name].splice(row - 1, 1); },
-      setColumnWidths() {}, setColumnWidth() {}, setFrozenRows() {}, hideColumns() {},
+      setColumnWidths(start, count, width) { for (let column = start; column < start + count; column += 1) meta[name].widths[column] = width; },
+      setColumnWidth(column, width) { meta[name].widths[column] = width; },
+      setFrozenRows(rows) { meta[name].frozenRows = rows; },
+      hideColumns(start, count = 1) { for (let column = start; column < start + count; column += 1) meta[name].hiddenColumns[column] = true; },
       isRowHiddenByUser: row => !!hidden[name][row]
     };
   }
@@ -110,7 +115,7 @@ module.exports = function workbook() {
     const index = data['Интерфейс собственника'].findIndex(r => readValue(r?.[0]) === id);
     if (index < 0) throw Error('No view ID ' + id);
     value('Интерфейс собственника', index + 1, 8, checked);
-    context.onEdit({ range: { getSheet: () => sheet('Интерфейс собственника') } });
+    context.onEdit({ range: range('Интерфейс собственника', index + 1, 8) });
   }
-  return { api: context, data: () => data, cells, value, readValue, calls, select, ss, sheet, meta, hidden, documentProperties, userProperties, failNextBatch: () => { failBatch = true; } };
+  return { api: context, data: () => data, cells, value, range, readValue, calls, select, ss, sheet, meta, hidden, documentProperties, userProperties, failNextBatch: () => { failBatch = true; } };
 };

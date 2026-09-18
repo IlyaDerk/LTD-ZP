@@ -3,6 +3,66 @@ const assert = require('node:assert/strict');
 const workbook = require('./helpers/owner-workbook');
 const payments = w => JSON.stringify(w.cells('Статьи оплаты'));
 const plain = v => JSON.parse(JSON.stringify(v));
+const cell = (w, row, column) => w.readValue(w.cells('Интерфейс собственника')[row - 1]?.[column - 1]);
+
+test('сводка использует новые семь координат и очищает только прежние служебные ячейки', () => {
+  const w = workbook(), state = w.api.ownerGetState();
+  assert.deepEqual([
+    cell(w, 5, 2), cell(w, 5, 3), cell(w, 5, 4), cell(w, 5, 5),
+    cell(w, 5, 7), cell(w, 5, 8), cell(w, 5, 9)
+  ], [state.summary.planned, state.summary.toPay, state.summary.paid, state.summary.total, state.summary.count, 0, 0]);
+  assert.deepEqual([cell(w, 4, 2), cell(w, 4, 3), cell(w, 4, 4), cell(w, 4, 5), cell(w, 4, 7), cell(w, 4, 8), cell(w, 4, 9)],
+    ['Запланировано', 'К оплате', 'Выплачено', 'Итого', 'Найдено статей', 'Выбрано статей', 'Сумма выбранных']);
+  assert.deepEqual(w.cells('Интерфейс собственника')[9].slice(0, 10).map(value => w.readValue(value)),
+    ['ID статьи', 'Дата готовности', 'Объект', 'Сотрудник', 'Статья', 'Сумма', 'Статус', 'Выбрать', 'Дата выплаты', 'Комментарий']);
+  assert.equal(w.meta['Интерфейс собственника'].frozenRows, 10);
+  assert.equal(w.meta['Интерфейс собственника'].hiddenColumns[1], true);
+  assert.deepEqual(w.meta['Интерфейс собственника'].widths, { 2: 164, 3: 220, 4: 220, 5: 220, 6: 130, 7: 145, 8: 125, 9: 168, 10: 240 });
+
+  [[6, 2], [7, 2], [6, 4], [7, 4], [8, 2]].forEach(([row, column]) => w.value('Интерфейс собственника', row, column, 'старый дубль'));
+  w.value('Интерфейс собственника', 6, 3, 'Пользовательская ячейка');
+  w.value('Интерфейс собственника', 8, 4, 'Не очищать');
+  const articleRows = structuredClone(w.cells('Интерфейс собственника').slice(10));
+  w.api.ownerGetState(state.version);
+  assert.deepEqual([[6, 2], [7, 2], [6, 4], [7, 4], [8, 2]].map(([row, column]) => cell(w, row, column)), ['', '', '', '', '']);
+  assert.equal(cell(w, 6, 3), 'Пользовательская ячейка');
+  assert.equal(cell(w, 8, 4), 'Не очищать');
+  assert.deepEqual(w.cells('Интерфейс собственника').slice(10), articleRows, 'строки статей, checkbox, Note, формулы, validation и формат должны сохраниться');
+  const stable = structuredClone(w.cells('Интерфейс собственника'));
+  w.api.ownerGetState(state.version);
+  assert.deepEqual(w.cells('Интерфейс собственника'), stable, 'повторная отрисовка должна быть идемпотентна по данным и структуре ячеек');
+});
+
+test('onEdit игнорирует изменения вне Выбрать и не читает книгу', () => {
+  const w = workbook(); w.api.ownerGetState();
+  const calls = w.calls.length, before = structuredClone(w.cells('Интерфейс собственника'));
+  let reads = 0; const read = w.api.readPayrollWorkbook;
+  w.api.readPayrollWorkbook = ss => { reads += 1; return read(ss); };
+  w.api.onEdit({ range: w.range('Интерфейс собственника', 11, 6) });
+  w.api.onEdit({ range: w.range('Интерфейс собственника', 11, 7, 1, 3) });
+  w.api.onEdit({ range: w.range('Интерфейс собственника', 10, 8) });
+  w.api.onEdit({ range: w.range('Интерфейс собственника', 999, 8) });
+  assert.equal(reads, 0); assert.equal(w.calls.length, calls);
+  assert.deepEqual(w.cells('Интерфейс собственника'), before);
+});
+
+test('onEdit checkbox обновляет только H5:I5, поддерживает диапазон и не читает справочники', () => {
+  const w = workbook(); w.api.ownerGetState();
+  const ids = ['PAY-ED36BAC4', 'PAY-8D4056C3'];
+  const indexes = ids.map(id => w.cells('Интерфейс собственника').findIndex(row => w.readValue(row?.[0]) === id));
+  indexes.forEach(index => w.value('Интерфейс собственника', index + 1, 8, true));
+  const before = structuredClone(w.cells('Интерфейс собственника'));
+  const source = payments(w); let reads = 0; const read = w.api.readPayrollWorkbook;
+  w.api.readPayrollWorkbook = ss => { reads += 1; return read(ss); };
+  const first = Math.min(...indexes) + 1, last = Math.max(...indexes) + 1;
+  w.api.onEdit({ range: w.range('Интерфейс собственника', first, 8, last - first + 1, 1) });
+  assert.equal(reads, 0); assert.equal(payments(w), source);
+  assert.equal(cell(w, 5, 8), 2); assert.equal(cell(w, 5, 9), 165000);
+  w.cells('Интерфейс собственника').forEach((row, ri) => row.forEach((value, ci) => {
+    if (ri === 4 && (ci === 7 || ci === 8)) return;
+    assert.deepEqual(value, before[ri]?.[ci]);
+  }));
+});
 
 for (const ids of [['PAY-ED36BAC4'], ['PAY-ED36BAC4', 'PAY-8D4056C3']]) {
   test('после оплаты интерфейс актуален при устаревшем чтении SpreadsheetApp: ' + ids.length + ' статьи', () => {

@@ -45,6 +45,41 @@ function ownerCell_(sheetId, row, column, value) {
   return { updateCells: { range: { sheetId: sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: column - 1, endColumnIndex: column }, rows: [{ values: [v] }], fields: 'userEnteredValue' } };
 }
 
+function ownerLayoutValues_(sheet, values, includeHeaders) {
+  var entries = [
+    [1, 2, 'Зарплаты — интерфейс собственника'],
+    [2, 2, 'Флажок только выбирает статью. Оплата — после подтверждения в sidebar.'],
+    [3, 2, 'Сводная зарплат'],
+    [4, 2, 'Запланировано'], [4, 3, 'К оплате'], [4, 4, 'Выплачено'], [4, 5, 'Итого'],
+    [4, 7, 'Найдено статей'], [4, 8, 'Выбрано статей'], [4, 9, 'Сумма выбранных'],
+    [6, 2, ''], [7, 2, ''], [6, 4, ''], [7, 4, ''], [8, 2, '']
+  ];
+  if (includeHeaders) OWNER_HEADERS_.forEach(function (header, index) { entries.push([OWNER_HEADER_ROW_, index + 1, header]); });
+  return entries.filter(function (entry) {
+    return !values[entry[0] - 1] || values[entry[0] - 1][entry[1] - 1] !== entry[2];
+  }).map(function (entry) { return ownerCell_(sheet.getSheetId(), entry[0], entry[1], entry[2]); });
+}
+
+function ownerFormatLayout_(sheet) {
+  var dark = '#415a77', light = '#fff2cc', header = '#e8edf3';
+  sheet.getRange(1, 2).setFontSize(16).setFontWeight('bold');
+  sheet.getRange(3, 2).setBackground(dark).setFontColor('#ffffff').setFontSize(12).setFontWeight('bold').setHorizontalAlignment('left');
+  [sheet.getRange(4, 2, 1, 4), sheet.getRange(4, 7, 1, 3)].forEach(function (range) {
+    range.setBackground(dark).setFontColor('#ffffff').setFontSize(12).setFontWeight('bold').setHorizontalAlignment('left').setWrap(false);
+  });
+  [sheet.getRange(5, 2, 1, 4), sheet.getRange(5, 7, 1, 3)].forEach(function (range) {
+    range.setBackground(light).setFontSize(12).setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle').setWrap(false);
+  });
+  sheet.getRange(5, 2, 1, 4).setNumberFormat('#,##0" ₽"');
+  sheet.getRange(5, 7, 1, 2).setNumberFormat('#,##0');
+  sheet.getRange(5, 9).setNumberFormat('#,##0" ₽"');
+  sheet.getRange(OWNER_HEADER_ROW_, 1, 1, 10).setBackground(header).setFontWeight('bold').setWrap(true);
+  sheet.setColumnWidths(2, 1, 164); sheet.setColumnWidths(3, 3, 220);
+  sheet.setColumnWidth(6, 130); sheet.setColumnWidth(7, 145); sheet.setColumnWidth(8, 125);
+  sheet.setColumnWidth(9, 168); sheet.setColumnWidth(10, 240);
+  sheet.setFrozenRows(OWNER_HEADER_ROW_); sheet.hideColumns(1);
+}
+
 function ownerLayout_(ss) {
   var sheet = ss.getSheetByName(PAYROLL_CONFIG.sheets.owner);
   if (!sheet) throw new Error('Не найден лист «Интерфейс собственника»');
@@ -52,25 +87,10 @@ function ownerLayout_(ss) {
   var initialized = values[OWNER_HEADER_ROW_ - 1] && OWNER_HEADERS_.every(function (h, i) { return values[OWNER_HEADER_ROW_ - 1][i] === h; });
   if (!initialized) {
     if (values.some(function (r) { return r.slice(0, 10).some(function (v) { return v !== ''; }); })) throw new Error('В области A:J интерфейса есть неизвестная структура. Она не была перезаписана.');
-    var labels = [
-      [1, 2, 'Зарплаты — интерфейс собственника'],
-      [2, 2, 'Флажок только выбирает статью. Оплата — после подтверждения в sidebar.'],
-      [4, 2, 'Запланировано'], [4, 4, 'К оплате'], [4, 6, 'Выплачено'], [4, 8, 'Итого по фильтру'],
-      [6, 2, 'Выбрано статей'], [6, 4, 'Сумма выбранных']
-    ];
-    var requests = labels.map(function (x) { return ownerCell_(sheet.getSheetId(), x[0], x[1], x[2]); });
-    OWNER_HEADERS_.forEach(function (h, i) { requests.push(ownerCell_(sheet.getSheetId(), OWNER_HEADER_ROW_, i + 1, h)); });
-    Sheets.Spreadsheets.batchUpdate({ requests: requests }, ss.getId());
-    sheet.getRange(OWNER_HEADER_ROW_, 1, 1, 10).setBackground('#e8edf3').setFontWeight('bold').setWrap(true);
-    sheet.getRange(1, 2).setFontSize(16).setFontWeight('bold');
-    sheet.getRange(5, 2, 1, 8).setNumberFormat('#,##0.00 "₽"');
-    sheet.getRange(7, 4).setNumberFormat('#,##0.00 "₽"');
-    sheet.setColumnWidths(2, 1, 115); sheet.setColumnWidths(3, 3, 220);
-    sheet.setColumnWidth(6, 130); sheet.setColumnWidth(7, 145); sheet.setColumnWidth(8, 125);
-    sheet.setColumnWidth(9, 115); sheet.setColumnWidth(10, 240);
-    sheet.setFrozenRows(OWNER_HEADER_ROW_);
   }
-  sheet.hideColumns(1);
+  var requests = ownerLayoutValues_(sheet, values, !initialized);
+  if (requests.length) Sheets.Spreadsheets.batchUpdate({ requests: requests }, ss.getId());
+  ownerFormatLayout_(sheet);
   return sheet;
 }
 
@@ -82,7 +102,7 @@ function ownerViewRows_(sheet) {
 }
 
 function ownerSummaryRequests_(sheet, summary) {
-  var entries = [[5, 2, summary.planned], [5, 4, summary.toPay], [5, 6, summary.paid], [5, 8, summary.total], [7, 2, summary.selectedCount], [7, 4, summary.selectedAmount], [8, 2, summary.count ? 'Найдено статей: ' + summary.count : 'По выбранным фильтрам статей нет']];
+  var entries = [[5, 2, summary.planned], [5, 3, summary.toPay], [5, 4, summary.paid], [5, 5, summary.total], [5, 7, summary.count], [5, 8, summary.selectedCount], [5, 9, summary.selectedAmount]];
   return entries.map(function (x) { return ownerCell_(sheet.getSheetId(), x[0], x[1], x[2]); });
 }
 
@@ -148,6 +168,7 @@ function ownerGetState(version) {
   return withPayrollLock(function () {
     var ss = getPayrollSpreadsheet_();
     if (!PropertiesService.getDocumentProperties().getProperty('payroll.owner.view')) return ownerRender_(ss, ownerSource_(ss), {});
+    ownerLayout_(ss);
     var ctx = ownerContext_(ss, version);
     return ownerResponse_(ctx.source, ctx.state, ctx.selected);
   });
@@ -221,15 +242,29 @@ function ownerConfirmPayment(token, version) {
 
 function onEdit(e) {
   if (!e || !e.range || e.range.getSheet().getName() !== PAYROLL_CONFIG.sheets.owner) return;
-  // Selection edits never touch the source. PAID checks are restored even after paste.
-  return withPayrollLock(function () {
-    var ss = getPayrollSpreadsheet_(), saved = PropertiesService.getDocumentProperties().getProperty('payroll.owner.view');
-    if (!saved) return;
-    var ctx = ownerContext_(ss), paid = PayrollOwnerCore.unique(ctx.source.rows);
-    ctx.rows.forEach(function (r) { if (paid[r.id] && paid[r.id].status === 'Выплачено' && !r.selected) ctx.sheet.getRange(r._row, 8).setValue(true); });
-    var summary = ownerResponse_(ctx.source, ctx.state, ctx.selected).summary;
-    ctx.sheet.getRange(7, 2).setValue(summary.selectedCount); ctx.sheet.getRange(7, 4).setValue(summary.selectedAmount);
-  });
+  var firstRow = e.range.getRow(), lastRow = firstRow + e.range.getNumRows() - 1;
+  var firstColumn = e.range.getColumn(), lastColumn = firstColumn + e.range.getNumColumns() - 1;
+  if (lastRow <= OWNER_HEADER_ROW_ || firstColumn !== 8 || lastColumn !== 8) return;
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) throw new Error('Интерфейс занят другим действием. Повторите выбор.');
+  try {
+    var ss = getPayrollSpreadsheet_(), sheet = ss.getSheetByName(PAYROLL_CONFIG.sheets.owner);
+    var rows = ownerViewRows_(sheet), requests = [], selectedCount = 0, selectedAmount = 0;
+    if (!rows.some(function (row) { return row._row >= firstRow && row._row <= lastRow; })) return;
+    rows.forEach(function (row) {
+      if (row._row >= firstRow && row._row <= lastRow && row.status === 'Выплачено' && !row.selected) {
+        row.selected = true;
+        requests.push(ownerCell_(sheet.getSheetId(), row._row, 8, true));
+      }
+      if (row.selected && row.status !== 'Выплачено' && !sheet.isRowHiddenByUser(row._row)) {
+        selectedCount += 1;
+        selectedAmount += Number(row._values[5]) || 0;
+      }
+    });
+    requests.push(ownerCell_(sheet.getSheetId(), 5, 8, selectedCount));
+    requests.push(ownerCell_(sheet.getSheetId(), 5, 9, Math.round(selectedAmount * 100) / 100));
+    Sheets.Spreadsheets.batchUpdate({ requests: requests }, ss.getId());
+  } finally { lock.releaseLock(); }
 }
 
 if (typeof module !== 'undefined') module.exports = { ownerApplyFilters: ownerApplyFilters, ownerGetState: ownerGetState, ownerPreviewPayment: ownerPreviewPayment, ownerConfirmPayment: ownerConfirmPayment, ownerPaymentRequests_: ownerPaymentRequests_, ownerCell_: ownerCell_, onOpen: onOpen, onEdit: onEdit, openPayrollSidebar: openPayrollSidebar };

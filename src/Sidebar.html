@@ -23,8 +23,10 @@
     #message { white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px 0; }
     #message.error { color: #a32922; } #message.success { color: #196d43; }
     #confirmation { border-color: #ba784a; } #confirmation[hidden] { display: none; }
-    #skipped { border-color: #d79a79; background: #fff8f3; }
-    #skipped[hidden] { display: none; }
+    #skipped { border-color: #d79a79; background: #fff8f3; padding: 8px 12px; }
+    #skipped-toggle { min-height: 28px; margin: 0; padding: 2px 0; border: 0; background: transparent; color: #263445; font-weight: 700; text-align: left; }
+    #skipped-toggle::after { content: ' ▾'; } #skipped-toggle[aria-expanded="true"]::after { content: ' ▴'; }
+    #skipped-details { margin-top: 8px; } #skipped-details[hidden] { display: none; }
     .skipped-deal { border-top: 1px solid #efd7c8; padding-top: 8px; margin-top: 8px; }
     .skipped-deal:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
     .skipped-deal p { margin: 3px 0; overflow-wrap: anywhere; }
@@ -33,9 +35,9 @@
 <body>
   <h1>Зарплаты</h1>
   <p class="muted">Выберите статьи на листе «Интерфейс собственника». Флажок не фиксирует выплату.</p>
-  <section id="skipped" hidden>
-    <h2 id="skipped-title">Пропущенные сделки</h2>
-    <div id="skipped-list"></div>
+  <section id="skipped">
+    <button id="skipped-toggle" type="button" aria-expanded="false">Пропущенные сделки: 0</button>
+    <div id="skipped-details" hidden><div id="skipped-list"></div></div>
   </section>
   <section>
     <h2>Фильтры</h2>
@@ -67,27 +69,33 @@
   <div id="message" role="status" aria-live="polite">Загрузка…</div>
   <script>
     'use strict';
-    let version = '', busy = false, quote = null, state = null;
+    let version = '', operation = '', quote = null, state = null;
     const $ = id => document.getElementById(id);
     const money = value => new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB' }).format(value);
     const keys = ['from', 'to', 'employee', 'status', 'object'];
     function message(text, kind = '') { $('message').textContent = text; $('message').className = kind; }
     function invalidate() { quote = null; $('confirmation').hidden = true; }
     function controls() {
-      document.querySelectorAll('button').forEach(b => { b.disabled = busy; });
-      $('preview').disabled = busy || !state || state.stale || !state.summary.selectedCount;
-      $('confirm').disabled = busy || !quote;
+      const pending = !!operation;
+      $('apply').disabled = pending;
+      $('reset').disabled = pending;
+      $('refresh').disabled = pending;
+      $('preview').disabled = !!operation || !state || state.stale || !state.summary.selectedCount;
+      $('confirm').disabled = !!operation || !quote;
+      $('cancel').disabled = operation === 'confirm';
     }
-    function call(name, args, success, quiet = false) {
-      if (busy) return;
-      busy = true; controls();
-      if (!quiet) message('Выполняется…');
+    function call(action, name, args, pendingMessage, success) {
+      if (operation) return false;
+      operation = action; controls(); message(pendingMessage);
       const runner = google.script.run.withSuccessHandler(result => {
-        busy = false; success(result); controls();
+        operation = '';
+        try { success(result); } catch (error) { invalidate(); message(error.message || String(error), 'error'); }
+        controls();
       }).withFailureHandler(error => {
-        busy = false; invalidate(); message(error.message || String(error), 'error'); controls();
+        operation = ''; invalidate(); message(error.message || String(error), 'error'); controls();
       });
       runner[name](...args);
+      return true;
     }
     function optionList(id, items, first, selected) {
       const control = $(id); control.replaceChildren(new Option(first, ''));
@@ -102,9 +110,9 @@
       return element;
     }
     function renderSkipped(items) {
-      const section = $('skipped'), list = $('skipped-list'), deals = Array.isArray(items) ? items : [];
-      list.replaceChildren(); section.hidden = deals.length === 0;
-      $('skipped-title').textContent = 'Пропущенные сделки: ' + deals.length;
+      const list = $('skipped-list'), deals = Array.isArray(items) ? items : [];
+      list.replaceChildren();
+      $('skipped-toggle').textContent = 'Пропущенные сделки: ' + deals.length;
       deals.forEach(deal => {
         const card = document.createElement('div'); card.className = 'skipped-deal';
         appendText(card, 'p', 'ID: ' + deal.dealId + '. ' + (deal.dealName || 'Без названия'));
@@ -138,26 +146,28 @@
       if (result.stale) { invalidate(); message('Исходные статьи изменились. Нажмите «Применить фильтры» и повторите выбор.', 'error'); }
       else message(summary.count ? 'В выдаче статей: ' + summary.count : 'По выбранным фильтрам статей нет.');
     }
-    function apply(filters) { invalidate(); call('ownerApplyFilters', [filters], result => render(result, true)); }
+    function apply(filters) { invalidate(); call('filters', 'ownerApplyFilters', [filters], 'Применяем фильтры…', result => render(result, true)); }
     $('apply').onclick = () => apply(Object.fromEntries(keys.map(k => [k, $(k).value])));
     $('reset').onclick = () => apply({});
-    $('refresh').onclick = () => { invalidate(); call('ownerGetState', [], result => render(result, true)); };
+    $('refresh').onclick = () => { invalidate(); call('refresh', 'ownerGetState', [version], 'Обновляем выбор…', result => render(result, true)); };
     keys.forEach(k => $(k).onchange = () => { invalidate(); controls(); });
-    $('preview').onclick = () => call('ownerPreviewPayment', [version], result => {
+    $('preview').onclick = () => call('preview', 'ownerPreviewPayment', [version], 'Проверяем выплату…', result => {
       quote = result; $('quote').textContent = 'Статей: ' + result.count + '. Общая сумма: ' + money(result.amount) + '. ID: ' + result.ids.join(', ');
       $('confirmation').hidden = false; message('Проверьте сумму и подтвердите факт выплаты.');
     });
     $('cancel').onclick = () => { invalidate(); controls(); message('Подтверждение отменено. Статьи не изменены.'); };
     $('confirm').onclick = () => {
       if (!quote) return;
-      call('ownerConfirmPayment', [quote.token, version], result => {
+      call('confirm', 'ownerConfirmPayment', [quote.token, version], 'Записываем выплату…', result => {
         invalidate(); if (result.state) render(result.state, true);
         message(result.warning || 'Зафиксировано выплат: ' + result.paidCount + ', сумма ' + money(result.amount), result.warning ? 'error' : 'success');
       });
     };
-    call('ownerGetState', [], result => render(result, true));
-    // Poll only selection/state; never perform calculation or payment in the background.
-    setInterval(() => { if (!busy && !quote && version) call('ownerGetState', [version], result => render(result, false), true); }, 6000);
+    $('skipped-toggle').onclick = () => {
+      const details = $('skipped-details'), expanded = details.hidden;
+      details.hidden = !expanded; $('skipped-toggle').setAttribute('aria-expanded', String(expanded));
+    };
+    call('load', 'ownerGetState', [], 'Загрузка…', result => render(result, true));
   </script>
 </body>
 </html>
