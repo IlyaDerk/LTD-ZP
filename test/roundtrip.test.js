@@ -29,13 +29,14 @@ function workbook() {
     if (!rows) return null;
     const width = Math.max(...rows.map(r => r.length));
     return {
-      getSheetId: () => ids[name], getParent: () => ss, getMaxRows: () => Math.max(rows.length, 1000),
+      getSheetId: () => ids[name], getName: () => name, getParent: () => ss, getMaxRows: () => Math.max(rows.length, 1000),
       getDataRange: () => ({
         getValues: () => rows.map(row => Array.from({ length: width }, (_, i) => readValue(row[i] || {}))),
         getFormulas: () => rows.map(row => Array.from({ length: width }, (_, i) => row[i]?.value?.formulaValue || '')),
         getNotes: () => rows.map(row => Array.from({ length: width }, (_, i) => row[i]?.note || ''))
       }),
-      getLastRow: () => rows.reduce((last, row, index) => row.some(cell => readValue(cell) !== '') ? index + 1 : last, 0)
+      getLastRow: () => rows.reduce((last, row, index) => row.some(cell => readValue(cell) !== '') ? index + 1 : last, 0),
+      getRange: (row, column) => ({ getDataValidation: () => rows[row - 1]?.[column - 1]?.validation || null })
     };
   } };
   global.Sheets = { Spreadsheets: { batchUpdate(body, id) {

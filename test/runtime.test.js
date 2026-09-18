@@ -34,7 +34,14 @@ test('запись выплаты использует русский стату
   global.Sheets = { Spreadsheets: { batchUpdate: body => requests.push(...body.requests) } };
   const table = {
     headers: ['ID статьи', 'ID сделки', 'ID сотрудника', 'Код статьи', 'ID правила', 'Расчётная база', 'Ставка', 'Доля', 'Расчётная сумма', 'Дата готовности', 'Статус', 'Оплатить', 'Дата выплаты', 'Причина уточнения', 'Комментарий', 'Создано', 'Обновлено'],
-    sheet: { getSheetId: () => 1, getParent: () => ({ getId: () => 'TEST' }), getLastRow: () => 2, getMaxRows: () => 100 }
+    sheet: {
+      getSheetId: () => 1,
+      getName: () => 'Статьи оплаты',
+      getParent: () => ({ getId: () => 'TEST' }),
+      getLastRow: () => 2,
+      getMaxRows: () => 100,
+      getRange: () => ({ getDataValidation: () => null })
+    }
   };
   const row = { _row: 2, _values: Array(17).fill(''), id: 'P1', dealId: 'D1', employeeId: 'E1', articleCode: 'A', ruleId: 'R', base: 100, rate: 1, share: 1, amount: 100, readyDate: '', status: 'PLANNED', paid: false, paymentDate: '', comment: '', createdAt: '2026-09-03', updatedAt: '2026-09-03' };
   row._values[13] = 'Существующее значение';

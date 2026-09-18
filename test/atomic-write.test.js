@@ -18,6 +18,16 @@ function readCell(cell = {}) {
   return value.stringValue ?? value.numberValue ?? value.boolValue ?? '';
 }
 
+function cloneGrid(grid) {
+  return grid.map(row => row.map(cell => {
+    const validation = cell.validation;
+    if (!validation || typeof validation.getCriteriaType !== 'function') return structuredClone(cell);
+    const plain = { ...cell };
+    delete plain.validation;
+    return { ...structuredClone(plain), validation };
+  }));
+}
+
 function article(id, dealId, overrides = {}) {
   return {
     id, dealId, employeeId: 'E1', articleCode: 'ARTICLE', ruleId: 'RULE', base: 100,
@@ -42,9 +52,11 @@ function harness(existing = [], options = {}) {
   const ss = { getId: () => 'SPREADSHEET' };
   const sheet = {
     getSheetId: () => 7,
+    getName: () => 'Статьи оплаты',
     getParent: () => ss,
     getMaxRows: () => maxRows,
-    getLastRow: () => grid.reduce((last, row, index) => row.some(cell => readCell(cell) !== '') ? index + 1 : last, 0)
+    getLastRow: () => grid.reduce((last, row, index) => row.some(cell => readCell(cell) !== '') ? index + 1 : last, 0),
+    getRange: (row, column) => ({ getDataValidation: () => grid[row - 1]?.[column - 1]?.validation || null })
   };
   function reject(stage, request, ordinal) {
     if (typeof options.fail === 'function' && options.fail(stage, request, ordinal)) throw new Error('Искусственная ошибка: ' + stage);
@@ -52,7 +64,7 @@ function harness(existing = [], options = {}) {
   global.Sheets = { Spreadsheets: { batchUpdate(body, spreadsheetId) {
     assert.equal(spreadsheetId, ss.getId());
     calls += 1;
-    let working = structuredClone(grid), workingMaxRows = maxRows, ordinal = 0;
+    let working = cloneGrid(grid), workingMaxRows = maxRows, ordinal = 0;
     for (const request of body.requests) {
       ordinal += 1;
       if (request.appendDimension) {
@@ -83,18 +95,89 @@ function harness(existing = [], options = {}) {
   function tableRows() {
     return existing.map((row, index) => ({ ...row, _row: index + 2, _values: grid[index + 1].map(readCell), _formulas: grid[index + 1].map(cell => cell.value?.formulaValue || '') }));
   }
-  return { sheet, rows: tableRows, grid: () => grid, calls: () => calls, snapshot: () => structuredClone(grid) };
+  return { sheet, rows: tableRows, grid: () => grid, calls: () => calls, snapshot: () => cloneGrid(grid) };
 }
 
 function table(h) { return { headers: HEADERS, sheet: h.sheet }; }
 function assertUnchanged(h, before) { assert.deepEqual(h.grid(), before, 'значения, формулы, Note, validation и форматирование должны совпасть со снимком'); }
+function appsScriptValidation(type, values, allowInvalid = false) {
+  return {
+    getCriteriaType: () => type,
+    getCriteriaValues: () => values,
+    getAllowInvalid: () => allowInvalid
+  };
+}
 
-test('конфликт validation в одной целевой ячейке отменяет весь пакет', () => {
-  const h = harness(), target = h.grid()[1][0];
-  target.validation = { condition: { type: 'TEXT_EQ', values: ['OTHER'] }, strict: true };
-  h.grid()[0][15].value = { formulaValue: '=1+1' }; h.grid()[0][15].effective = { numberValue: 2 };
+test('строгая NUMBER_EQ отклоняет несовместимую сумму до batchUpdate', () => {
+  const old = article('A1', 'D1'), h = harness([old]);
+  h.grid()[1][8].validation = appsScriptValidation('NUMBER_EQUAL_TO', [100]);
+  const next = { ...old, ...h.rows()[0], amount: 150, updatedAt: '2026-09-17T01:00:00.000Z' };
   const before = h.snapshot();
-  assert.throws(() => sheets.writePayrollChanges(table(h), [{ row: article('A1', 'D1'), changed: true }]), /validation/);
+  assert.throws(() => sheets.writePayrollChanges(table(h), [{ row: next, changed: true }]), /I2.*NUMBER_EQ/);
+  assert.equal(h.calls(), 0, 'batchUpdate не должен вызываться после ошибки preflight');
+  assertUnchanged(h, before);
+});
+
+test('совместимое числовое значение проходит строгую NUMBER_EQ', () => {
+  const old = article('A1', 'D1'), h = harness([old]);
+  h.grid()[1][8].validation = appsScriptValidation('NUMBER_EQUAL_TO', [150]);
+  const next = { ...old, ...h.rows()[0], amount: 150, updatedAt: '2026-09-17T01:00:00.000Z' };
+  assert.equal(sheets.writePayrollChanges(table(h), [{ row: next, changed: true }]), 1);
+  assert.equal(h.calls(), 1);
+  assert.equal(readCell(h.grid()[1][8]), 150);
+});
+
+test('checkbox новой строки принимает только логическое значение', () => {
+  const rejected = harness(), before = rejected.snapshot();
+  assert.throws(() => sheets.writePayrollChanges(table(rejected), [
+    { row: article('A1', 'D1', { paid: 'FALSE' }), changed: true }
+  ]), /L2.*BOOLEAN/);
+  assert.equal(rejected.calls(), 0);
+  assertUnchanged(rejected, before);
+
+  const accepted = harness();
+  assert.equal(sheets.writePayrollChanges(table(accepted), [
+    { row: article('A1', 'D1', { paid: false }), changed: true }
+  ]), 1);
+  assert.equal(accepted.grid()[1][11].validation.condition.type, 'BOOLEAN');
+});
+
+test('допустимый статус проходит строгую проверку списка', () => {
+  const old = article('A1', 'D1'), h = harness([old]);
+  h.grid()[1][10].validation = appsScriptValidation('VALUE_IN_LIST', [
+    ['Запланировано', 'К оплате'], true
+  ]);
+  const next = { ...old, ...h.rows()[0], status: 'TO_PAY', updatedAt: '2026-09-17T01:00:00.000Z' };
+  assert.equal(sheets.writePayrollChanges(table(h), [{ row: next, changed: true }]), 1);
+  assert.equal(readCell(h.grid()[1][10]), 'К оплате');
+});
+
+test('недопустимый статус отклоняется до batchUpdate', () => {
+  const old = article('A1', 'D1'), h = harness([old]);
+  h.grid()[1][10].validation = appsScriptValidation('VALUE_IN_LIST', [
+    ['Запланировано', 'К оплате'], true
+  ]);
+  const next = { ...old, ...h.rows()[0], status: 'BROKEN', updatedAt: '2026-09-17T01:00:00.000Z' }, before = h.snapshot();
+  assert.throws(() => sheets.writePayrollChanges(table(h), [{ row: next, changed: true }]), /K2.*ONE_OF_LIST/);
+  assert.equal(h.calls(), 0);
+  assertUnchanged(h, before);
+});
+
+test('validation, разрешающая недействительные значения, не блокирует запись', () => {
+  const old = article('A1', 'D1'), h = harness([old]);
+  h.grid()[1][8].validation = appsScriptValidation('CUSTOM_FORMULA', ['=FALSE'], true);
+  const next = { ...old, ...h.rows()[0], amount: 150, updatedAt: '2026-09-17T01:00:00.000Z' };
+  assert.equal(sheets.writePayrollChanges(table(h), [{ row: next, changed: true }]), 1);
+  assert.equal(h.calls(), 1);
+});
+
+test('неизвестная строгая validation приводит к безопасному отказу', () => {
+  const old = article('A1', 'D1'), h = harness([old]);
+  h.grid()[1][8].validation = appsScriptValidation('CUSTOM_FORMULA', ['=FALSE']);
+  const next = { ...old, ...h.rows()[0], amount: 150, updatedAt: '2026-09-17T01:00:00.000Z' }, before = h.snapshot();
+  assert.throws(() => sheets.writePayrollChanges(table(h), [{ row: next, changed: true }]),
+    /Неизвестный тип строгой validation.*I2.*CUSTOM_FORMULA.*150/);
+  assert.equal(h.calls(), 0);
   assertUnchanged(h, before);
 });
 
@@ -138,10 +221,11 @@ test('несколько статей одной сделки записываю
 
 test('ошибка одной сделки не повреждает статьи другой сделки', () => {
   const other = article('B1', 'D2'), h = harness([other]);
-  h.grid()[2][0].validation = { condition: { type: 'TEXT_EQ', values: ['OTHER'] }, strict: true };
+  h.grid()[1][8].validation = { condition: { type: 'NUMBER_EQ', values: [{ userEnteredValue: '100' }] }, strict: true };
   const before = h.snapshot(), updatedOther = { ...other, ...h.rows()[0], amount: 200, updatedAt: '2026-09-17T02:00:00.000Z' };
   assert.throws(() => sheets.writePayrollChanges(table(h), [
     { row: updatedOther, changed: true }, { row: article('A1', 'D1'), changed: true }
   ]), /validation/);
+  assert.equal(h.calls(), 0);
   assertUnchanged(h, before);
 });

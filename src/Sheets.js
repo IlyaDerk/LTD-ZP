@@ -150,6 +150,82 @@ function paymentColumnIndexes(headers) {
   });
   return columns;
 }
+function validationType(rule) {
+  if (!rule) return '';
+  var type = typeof rule.getCriteriaType === 'function' ? rule.getCriteriaType() : rule.condition && rule.condition.type;
+  type = String(type || '');
+  return {
+    NUMBER_EQUAL_TO: 'NUMBER_EQ', NUMBER_EQ: 'NUMBER_EQ',
+    VALUE_IN_LIST: 'ONE_OF_LIST', ONE_OF_LIST: 'ONE_OF_LIST',
+    CHECKBOX: 'BOOLEAN', BOOLEAN: 'BOOLEAN'
+  }[type] || type;
+}
+function validationValues(rule) {
+  var values;
+  if (typeof rule.getCriteriaValues === 'function') values = rule.getCriteriaValues();
+  else values = rule.condition && rule.condition.values;
+  values = values || [];
+  if (values.length && Array.isArray(values[0])) values = values[0];
+  return values.map(function (value) {
+    if (value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'userEnteredValue')) return value.userEnteredValue;
+    return value;
+  });
+}
+function validationAllowsInvalid(rule) {
+  if (typeof rule.getAllowInvalid === 'function') return rule.getAllowInvalid();
+  if (typeof rule.allowInvalid === 'boolean') return rule.allowInvalid;
+  if (typeof rule.strict === 'boolean') return !rule.strict;
+  return true;
+}
+function sameValidationValue(left, right) {
+  if (typeof left === 'number' || typeof right === 'number') {
+    var a = Number(left), b = Number(right);
+    return Number.isFinite(a) && Number.isFinite(b) && a === b;
+  }
+  return String(left) === String(right);
+}
+function columnLabel(column) {
+  var label = '', number = column;
+  while (number > 0) { number -= 1; label = String.fromCharCode(65 + number % 26) + label; number = Math.floor(number / 26); }
+  return label;
+}
+function validationCoordinate(sheet, row, column) {
+  var name = typeof sheet.getName === 'function' ? sheet.getName() : '';
+  return (name ? '«' + name + '»!' : '') + columnLabel(column) + row;
+}
+function validationValueText(value) {
+  if (typeof value === 'string') return '«' + value + '»';
+  try { return JSON.stringify(value); } catch { return String(value); }
+}
+function assertValidationCompatible(rule, value, coordinate) {
+  if (!rule || validationAllowsInvalid(rule)) return;
+  var type = validationType(rule), values = validationValues(rule), compatible;
+  if (type === 'NUMBER_EQ') {
+    compatible = typeof value === 'number' && Number.isFinite(value) && values.length > 0 && sameValidationValue(value, values[0]);
+  } else if (type === 'ONE_OF_LIST') {
+    compatible = values.some(function (allowed) { return sameValidationValue(value, allowed); });
+  } else if (type === 'BOOLEAN') {
+    compatible = values.length >= 2
+      ? values.some(function (allowed) { return sameValidationValue(value, allowed); })
+      : typeof value === 'boolean';
+  } else {
+    throw new Error('Неизвестный тип строгой validation в ячейке ' + coordinate + ': ' + (type || 'не указан') + '. Предлагаемое значение: ' + validationValueText(value));
+  }
+  if (!compatible) throw new Error('Значение ' + validationValueText(value) + ' несовместимо со строгой validation в ячейке ' + coordinate + ' (тип ' + type + ')');
+}
+function preflightPaymentValidations(sheet, plans, cellPlans, columns) {
+  cellPlans.forEach(function (cell) {
+    if (!cell.existing) return;
+    var rule = sheet.getRange(cell.target, cell.column + 1).getDataValidation();
+    assertValidationCompatible(rule, cell.value, validationCoordinate(sheet, cell.target, cell.column + 1));
+  });
+  plans.forEach(function (plan) {
+    if (plan.row._row) return;
+    var paidColumn = columns.paid + 1;
+    assertValidationCompatible({ condition: { type: 'BOOLEAN' }, strict: true }, plan.row.paid,
+      validationCoordinate(sheet, plan.target, paidColumn));
+  });
+}
 function writePayrollChanges(table, results) {
   var changed = results.filter(function (x) { return x.changed; }); if (!changed.length) return 0;
   var headers = table.headers, sheet = table.sheet, writes = changed.filter(function (x) { return !x.remove; });
@@ -166,7 +242,7 @@ function writePayrollChanges(table, results) {
     if (!String(entry.row.dealId == null ? '' : entry.row.dealId).trim()) throw new Error('Статья ' + (entry.row.id || 'без ID') + ': не указан ID сделки');
     if (!entry.row._row) throw new Error('Нельзя удалить статью без номера строки: ' + entry.row.id);
   });
-  if (nextRow - 1 > sheet.getMaxRows()) requests.push({ appendDimension: { sheetId: sheetId, dimension: 'ROWS', length: nextRow - 1 - sheet.getMaxRows() } });
+  var cellPlans = [];
   plans.forEach(function (plan) {
     var row = plan.row;
     Object.keys(PAYMENT_COLUMNS).forEach(function (key) {
@@ -175,8 +251,16 @@ function writePayrollChanges(table, results) {
       var previous = row._values ? row._values[column] : '';
       if (row._row && previous === value) return;
       if (row._row && row._formulas && row._formulas[column]) throw new Error('Статья ' + row.id + ': поле «' + PAYMENT_COLUMNS[key] + '» содержит формулу. Атомарная запись отменена.');
-      requests.push(paymentCellRequest(sheetId, plan.target, column + 1, value, key));
+      cellPlans.push({ row: row, target: plan.target, column: column, value: value, key: key, existing: !!row._row });
     });
+  });
+  preflightPaymentValidations(sheet, plans, cellPlans, columns);
+  if (nextRow - 1 > sheet.getMaxRows()) requests.push({ appendDimension: { sheetId: sheetId, dimension: 'ROWS', length: nextRow - 1 - sheet.getMaxRows() } });
+  cellPlans.forEach(function (cell) {
+    requests.push(paymentCellRequest(sheetId, cell.target, cell.column + 1, cell.value, cell.key));
+  });
+  plans.forEach(function (plan) {
+    var row = plan.row;
     if (!row._row) requests.push({ setDataValidation: {
       range: { sheetId: sheetId, startRowIndex: plan.target - 1, endRowIndex: plan.target, startColumnIndex: columns.paid, endColumnIndex: columns.paid + 1 },
       rule: { condition: { type: 'BOOLEAN' }, strict: true, showCustomUi: true }
@@ -208,4 +292,4 @@ function ensurePaymentCheckbox(ss) {
   return true;
 }
 
-if (typeof module !== 'undefined') module.exports = { readPayrollWorkbook: readPayrollWorkbook, tableFromSheet: tableFromSheet, status: status, displayStatus: displayStatus, writePayrollChanges: writePayrollChanges, writePayrollDiagnostics: writePayrollDiagnostics, readPayrollDiagnostics: readPayrollDiagnostics, mergePayrollDiagnostic: mergePayrollDiagnostic, parsePayrollDiagnostic: parsePayrollDiagnostic, ensurePaymentCheckbox: ensurePaymentCheckbox, findHeaderRow: findHeaderRow };
+if (typeof module !== 'undefined') module.exports = { readPayrollWorkbook: readPayrollWorkbook, tableFromSheet: tableFromSheet, status: status, displayStatus: displayStatus, writePayrollChanges: writePayrollChanges, writePayrollDiagnostics: writePayrollDiagnostics, readPayrollDiagnostics: readPayrollDiagnostics, mergePayrollDiagnostic: mergePayrollDiagnostic, parsePayrollDiagnostic: parsePayrollDiagnostic, ensurePaymentCheckbox: ensurePaymentCheckbox, findHeaderRow: findHeaderRow, assertValidationCompatible: assertValidationCompatible };

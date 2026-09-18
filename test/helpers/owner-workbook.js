@@ -26,6 +26,7 @@ module.exports = function workbook() {
       setValue(v) { value(name, row, col, v); return r; },
       setValues(values) { values.forEach((line, ri) => line.forEach((v, ci) => value(name, row + ri, col + ci, v))); return r; },
       getNote() { return data[name][row - 1]?.[col - 1]?.note || ''; },
+      getDataValidation() { return data[name][row - 1]?.[col - 1]?.validation || null; },
       setNote(note) { const cell = ((data[name][row - 1] ||= [])[col - 1] ||= {}); cell.note = note; return r; },
       insertCheckboxes() {
         for (let ri = 0; ri < numRows; ri += 1) for (let ci = 0; ci < numCols; ci += 1) {
