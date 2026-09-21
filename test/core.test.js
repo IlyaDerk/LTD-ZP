@@ -67,6 +67,8 @@ test('все нулевые статьи отклоняют сделку цел�
   assert.match(warnings[0], /ZERO/);
   assert.match(warnings[0], /Нулевая сделка/);
   assert.match(warnings[0], /Стоимость сделки: 1 ₽/);
+  assert.match(warnings[0], /Рассчитанные статьи:/);
+  assert.match(warnings[0], /Причина:/);
   assert.match(warnings[0], /По сделке ничего не записано/);
 });
 

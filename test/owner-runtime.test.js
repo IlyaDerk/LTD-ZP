@@ -78,18 +78,18 @@ for (const ids of [['PAY-ED36BAC4'], ['PAY-ED36BAC4', 'PAY-8D4056C3']]) {
   test('после оплаты интерфейс актуален при устаревшем чтении SpreadsheetApp: ' + ids.length + ' статьи', () => {
     const w = workbook(), state = w.api.ownerGetState();
     ids.forEach(id => w.select(id));
-    const quote = w.api.ownerPreviewPayment(state.version);
+    const expectedAmount = ids.length === 1 ? 90000 : 165000;
     // Reproduce the live read-after-write cache: API writes commit, but reads
     // through SpreadsheetApp still return the pre-payment workbook this execution.
     const read = w.api.readPayrollWorkbook;
     let cached;
     w.api.readPayrollWorkbook = ss => cached || (cached = read(ss));
     let result;
-    try { result = w.api.ownerConfirmPayment(quote.token, state.version); }
+    try { result = w.api.ownerConfirmPayment(state.version); }
     finally { w.api.readPayrollWorkbook = read; }
     assert.equal(result.warning, undefined);
-    assert.equal(result.state.summary.paid, state.summary.paid + quote.amount);
-    assert.equal(result.state.summary.toPay, state.summary.toPay - quote.amount);
+    assert.equal(result.state.summary.paid, state.summary.paid + expectedAmount);
+    assert.equal(result.state.summary.toPay, state.summary.toPay - expectedAmount);
     assert.equal(result.state.summary.selectedCount, 0);
     ids.forEach(id => {
       const row = w.cells('Интерфейс собственника').find(r => w.readValue(r?.[0]) === id);
@@ -101,24 +101,23 @@ for (const ids of [['PAY-ED36BAC4'], ['PAY-ED36BAC4', 'PAY-8D4056C3']]) {
     assert.equal(fresh.stale, false, 'следующий запрос не должен объявлять собственную оплату внешним изменением');
     assert.deepEqual(plain(fresh.summary), plain(result.state.summary));
     const source = payments(w);
-    assert.throws(() => w.api.ownerConfirmPayment(quote.token, result.state.version), /Сначала/);
+    assert.throws(() => w.api.ownerConfirmPayment(result.state.version), /Не выбраны статьи со статусом “К оплате”/);
     assert.equal(payments(w), source);
   });
 }
 
-test('реальные адаптеры: checkbox выбирает, preview ничего не оплачивает, одиночная кнопка платит по ID', () => {
+test('реальные адаптеры: checkbox не меняет источник, одна серверная операция платит по ID', () => {
   const w = workbook(), state = w.api.ownerGetState();
   const before = payments(w);
   w.select('PAY-ED36BAC4');
   assert.equal(payments(w), before);
   assert.equal(w.api.ownerGetState().summary.selectedAmount, 90000);
-  const quote = w.api.ownerPreviewPayment(state.version);
-  assert.equal(quote.count, 1); assert.equal(quote.amount, 90000); assert.equal(payments(w), before);
-  const result = w.api.ownerConfirmPayment(quote.token, state.version);
+  const result = w.api.ownerConfirmPayment(state.version);
   assert.equal(result.paidCount, 1);
+  assert.equal(result.amount, 90000);
   assert.equal(w.readValue(w.cells('Статьи оплаты')[10][10]), 'Выплачено');
   assert.equal(w.readValue(w.cells('Статьи оплаты')[11][10]), 'К оплате');
-  assert.throws(() => w.api.ownerConfirmPayment(quote.token, state.version), /Сначала/);
+  assert.throws(() => w.api.ownerConfirmPayment(result.state.version), /Не выбраны статьи со статусом “К оплате”/);
   w.select('PAY-ED36BAC4', false);
   const paid = w.cells('Интерфейс собственника').find(r => w.readValue(r?.[0]) === 'PAY-ED36BAC4');
   assert.equal(w.readValue(paid[7]), true);
@@ -129,10 +128,9 @@ test('две выплаты записываются одним атомарны
   const w = workbook(), state = w.api.ownerGetState();
   const source = structuredClone(w.cells('Статьи оплаты'));
   w.select('PAY-ED36BAC4'); w.select('PAY-8D4056C3');
-  const quote = w.api.ownerPreviewPayment(state.version);
-  assert.equal(quote.amount, 165000);
-  const result = w.api.ownerConfirmPayment(quote.token, state.version);
+  const result = w.api.ownerConfirmPayment(state.version);
   assert.equal(result.paidCount, 2);
+  assert.equal(result.amount, 165000);
   const sourceBatches = w.calls.filter(reqs => reqs.some(r => r.updateCells?.range.sheetId === w.meta['Статьи оплаты'].id));
   assert.equal(sourceBatches.length, 1); assert.equal(sourceBatches[0].length, 8);
   w.cells('Статьи оплаты').forEach((row, ri) => row.forEach((cell, ci) => {
@@ -141,6 +139,8 @@ test('две выплаты записываются одним атомарны
     } else assert.deepEqual(cell, source[ri][ci]);
   }));
   assert.equal(result.state.summary.paid, 185000);
+  assert.equal(formula(w, 5, 8), '=COUNTIFS(H11:H,TRUE,G11:G,"К оплате")');
+  assert.equal(formula(w, 5, 9), '=SUMIFS(F11:F,H11:H,TRUE,G11:G,"К оплате")');
 });
 
 test('одна невалидная выбранная статья отменяет всю группу без частичных записей', () => {
@@ -148,25 +148,47 @@ test('одна невалидная выбранная статья отменя
   w.select('PAY-ED36BAC4');
   const invalid = w.cells('Интерфейс собственника').findIndex(row => w.readValue(row?.[0]) === 'PA-003');
   w.value('Интерфейс собственника', invalid + 1, 8, true); // имитируем обход onEdit внешней записью
-  assert.throws(() => w.api.ownerPreviewPayment(state.version), /не может быть оплачена/);
+  assert.throws(() => w.api.ownerConfirmPayment(state.version), /не может быть оплачена/);
+  assert.equal(payments(w), before);
+});
+
+test('выбранный ID вне текущей выдачи не отбрасывается молча и отменяет выплату', () => {
+  const w = workbook(), state = w.api.ownerApplyFilters({ employee: 'EMP_002' }), before = payments(w);
+  const row = w.cells('Интерфейс собственника').findIndex((item, index) => index >= 10 && w.readValue(item?.[0])) + 1;
+  w.value('Интерфейс собственника', row, 1, 'PAY-ED36BAC4');
+  w.value('Интерфейс собственника', row, 8, true);
+  assert.throws(() => w.api.ownerConfirmPayment(state.version), /Статья отсутствует в текущей выдаче/);
   assert.equal(payments(w), before);
 });
 
 for (const [name, change] of [
   ['сумма', w => w.value('Статьи оплаты', 11, 9, 1)],
-  ['статус', w => w.value('Статьи оплаты', 11, 11, 'Выплачено')],
-  ['выбор', w => w.select('PAY-8D4056C3')],
-  ['выдача', w => w.api.ownerApplyFilters({ employee: 'EMP_001' })]
-]) test('изменение после preview: ' + name + ' блокирует подтверждение', () => {
+  ['статус', w => w.value('Статьи оплаты', 11, 11, 'Выплачено')]
+]) test('изменение источника после формирования выдачи: ' + name + ' блокирует выплату', () => {
   const w = workbook(), state = w.api.ownerGetState(); w.select('PAY-ED36BAC4');
-  const quote = w.api.ownerPreviewPayment(state.version); change(w); const before = payments(w);
-  assert.throws(() => w.api.ownerConfirmPayment(quote.token, state.version)); assert.equal(payments(w), before);
+  change(w); const before = payments(w);
+  assert.throws(() => w.api.ownerConfirmPayment(state.version), /Исходные статьи изменились/); assert.equal(payments(w), before);
+});
+
+test('устаревшая версия компактной выдачи блокирует выплату', () => {
+  const w = workbook(), state = w.api.ownerGetState(); w.select('PAY-ED36BAC4');
+  w.api.ownerApplyFilters({ employee: 'EMP_001' });
+  const before = payments(w);
+  assert.throws(() => w.api.ownerConfirmPayment(state.version), /Выдача изменена в другом окне/);
+  assert.equal(payments(w), before);
+});
+
+test('отсутствие выбора отклоняется без записи', () => {
+  const w = workbook(), state = w.api.ownerGetState(), before = payments(w), calls = w.calls.length;
+  assert.throws(() => w.api.ownerConfirmPayment(state.version), /Не выбраны статьи со статусом “К оплате”/);
+  assert.equal(payments(w), before);
+  assert.equal(w.calls.length, calls, 'batchUpdate не вызывается');
 });
 
 test('ошибка Sheets API не оставляет частичную выплату', () => {
   const w = workbook(), state = w.api.ownerGetState(); w.select('PAY-ED36BAC4'); w.select('PAY-8D4056C3');
-  const quote = w.api.ownerPreviewPayment(state.version), before = payments(w);
-  w.failNextBatch(); assert.throws(() => w.api.ownerConfirmPayment(quote.token, state.version), /Atomic API failure/);
+  const before = payments(w);
+  w.failNextBatch(); assert.throws(() => w.api.ownerConfirmPayment(state.version), /Atomic API failure/);
   assert.equal(payments(w), before);
 });
 
@@ -247,7 +269,7 @@ test('пустой результат сохраняет источник и в�
 test('dailySync сохраняет PAID после подтверждения и остаётся идемпотентным', () => {
   const w = workbook(); w.api.dailySync();
   const state = w.api.ownerGetState(); w.select('PAY-ED36BAC4');
-  const quote = w.api.ownerPreviewPayment(state.version); w.api.ownerConfirmPayment(quote.token, state.version);
+  w.api.ownerConfirmPayment(state.version);
   const before = payments(w);
   assert.equal(w.api.dailySync().written, 0); assert.equal(w.api.dailySync().written, 0);
   assert.equal(payments(w), before);
@@ -268,7 +290,15 @@ test('dailySync удаляет прежние нулевые неоплачен�
   assert.equal((note.match(/--- Расчёт зарплаты: начало ---/g) || []).length, 1);
   const sidebar = w.api.ownerGetState();
   assert.equal(sidebar.skippedDeals.length, 1);
-  assert.equal(sidebar.skippedDeals[0].dealId, dealId);
+  assert.ok(sidebar.skippedDeals[0].objectId);
+  assert.ok(sidebar.skippedDeals[0].address);
+  assert.ok(sidebar.skippedDeals[0].actions.length);
+  sidebar.skippedDeals[0].actions.forEach(group => {
+    assert.match(group.action, /^(Заполнить|Исправить|Указать|Добавить в справочник|Проверить)$/);
+    assert.ok(group.items.length);
+  });
+  assert.equal(Object.hasOwn(sidebar.skippedDeals[0], 'reasons'), false);
+  assert.equal(Object.hasOwn(sidebar.skippedDeals[0], 'articles'), false);
 
   w.value('Выгрузка сделок', 5, 8, 200000);
   const corrected = w.api.dailySync();
@@ -283,6 +313,53 @@ test('dailySync удаляет прежние нулевые неоплачен�
   assert.equal(payments(w), beforeRepeat);
 });
 
+test('одна причина преобразуется в одну пользовательскую группу', () => {
+  const w = workbook();
+  const diagnostics = w.api.ownerUserDiagnostics_({
+    deals: { D1: { objectId: 'OBJ-1', objectName: 'Тестовый адрес' } },
+    skippedDeals: [{
+      dealId: 'D1', dealName: 'Техническое имя', projectCost: 100000,
+      articles: [{ name: 'Акт 1', amount: 0 }],
+      reasons: ['ФИО «Неизвестный» отсутствует в действующем справочнике сотрудников']
+    }]
+  });
+  assert.deepEqual(plain(diagnostics), [{
+    objectId: 'OBJ-1', address: 'Тестовый адрес', projectCost: 100000,
+    actions: [{ action: 'Добавить в справочник', items: ['сотрудника'] }]
+  }]);
+  assert.equal(Object.hasOwn(diagnostics[0], 'reasons'), false);
+  assert.equal(Object.hasOwn(diagnostics[0], 'articles'), false);
+});
+
+test('две причины с одинаковым действием объединяются без дублей', () => {
+  const w = workbook();
+  const [diagnostic] = w.api.ownerUserDiagnostics_({
+    deals: {},
+    skippedDeals: [{ dealId: 'D1', projectCost: 1, reasons: [
+      'Не заполнен инженер', 'Пустое поле визуализатор', 'Не заполнен инженер'
+    ] }]
+  });
+  assert.deepEqual(plain(diagnostic.actions), [{ action: 'Заполнить', items: ['инженера', 'визуализатора'] }]);
+});
+
+test('разнотипные причины возвращаются отдельными группами действий', () => {
+  const w = workbook();
+  const [diagnostic] = w.api.ownerUserDiagnostics_({
+    deals: {},
+    skippedDeals: [{ dealId: 'D1', projectCost: 1, reasons: [
+      'ФИО отсутствует в действующем справочнике сотрудников',
+      'Некорректная стоимость проекта',
+      'Некорректная стоимость проекта'
+    ] }]
+  });
+  assert.deepEqual(plain(diagnostic.actions), [
+    { action: 'Добавить в справочник', items: ['сотрудника'] },
+    { action: 'Исправить', items: ['стоимость проекта'] }
+  ]);
+  assert.equal(Object.hasOwn(diagnostic, 'reasons'), false);
+  assert.equal(Object.hasOwn(diagnostic, 'articles'), false);
+});
+
 test('меню и sidebar принадлежат привязанному проекту и не создают триггеры', () => {
   const w = workbook(), events = [];
   w.api.SpreadsheetApp.getUi = () => ({ createMenu: name => ({ addItem(label, handler) { events.push([name, label, handler]); return this; }, addToUi() {} }), showSidebar: html => events.push(html) });
@@ -291,20 +368,23 @@ test('меню и sidebar принадлежат привязанному про
   assert.deepEqual(plain(events), [['Зарплаты', 'Открыть интерфейс', 'openPayrollSidebar'], { name: 'Sidebar', title: 'Зарплаты' }]);
 });
 
-test('ручное изменение суммы в представлении не может подменить платёж', () => {
-  const w = workbook(), state = w.api.ownerGetState(); w.select('PAY-ED36BAC4');
-  w.value('Интерфейс собственника', 17, 6, 1);
-  const before = payments(w);
-  assert.throws(() => w.api.ownerPreviewPayment(state.version), /изменены вручную/);
-  assert.equal(payments(w), before);
-});
+for (const [name, column, value] of [['суммы', 6, 1], ['статуса', 7, 'Запланировано'], ['сотрудника', 4, 'Другой сотрудник']]) {
+  test('ручное изменение ' + name + ' в представлении не может подменить платёж', () => {
+    const w = workbook(), state = w.api.ownerGetState(); w.select('PAY-ED36BAC4');
+    const row = w.cells('Интерфейс собственника').findIndex(item => w.readValue(item?.[0]) === 'PAY-ED36BAC4') + 1;
+    w.value('Интерфейс собственника', row, column, value);
+    const before = payments(w);
+    assert.throws(() => w.api.ownerConfirmPayment(state.version), /изменены вручную/);
+    assert.equal(payments(w), before);
+  });
+}
 
 test('формула в записываемом поле источника отменяет всю выплату', () => {
   const w = workbook();
   const cell = w.cells('Статьи оплаты')[11][17];
   cell.value = { formulaValue: '="2026-09-06"' }; cell.effective = { stringValue: '2026-09-06' };
   const state = w.api.ownerGetState(); w.select('PAY-ED36BAC4'); w.select('PAY-8D4056C3');
-  const quote = w.api.ownerPreviewPayment(state.version), before = payments(w);
-  assert.throws(() => w.api.ownerConfirmPayment(quote.token, state.version), /содержит формулу/);
+  const before = payments(w);
+  assert.throws(() => w.api.ownerConfirmPayment(state.version), /содержит формулу/);
   assert.equal(payments(w), before);
 });

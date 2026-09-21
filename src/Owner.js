@@ -1,4 +1,4 @@
-/* exported onOpen, onEdit, openPayrollSidebar, ownerApplyFilters, ownerGetState, ownerPreviewPayment, ownerConfirmPayment */
+/* exported onOpen, onEdit, openPayrollSidebar, ownerApplyFilters, ownerGetState, ownerConfirmPayment */
 var OWNER_HEADERS_ = ['ID статьи', 'Дата готовности', 'Объект', 'Сотрудник', 'Статья', 'Сумма', 'Статус', 'Выбрать', 'Дата выплаты', 'Комментарий'];
 var OWNER_HEADER_ROW_ = 10;
 var OWNER_SELECTED_COUNT_FORMULA_ = '=COUNTIFS(H11:H,TRUE,G11:G,"К оплате")';
@@ -38,7 +38,55 @@ function ownerSource_(ss) {
   // Do not silently discard malformed source rows with an amount but without ID.
   if (input.existing.some(function (r) { return !r.id && (r.dealId || r.amount); })) throw new Error('В источнике есть статья без ID');
   PayrollOwnerCore.unique(rows);
-  return { table: input.paymentTable, rows: rows, skippedDeals: input.skippedDeals || [] };
+  return { table: input.paymentTable, rows: rows, skippedDeals: input.skippedDeals || [], deals: deals };
+}
+
+function ownerDiagnosticItem_(reason) {
+  var text = String(reason || '').toLowerCase();
+  if (/id сделки|id объекта/.test(text)) return 'ID объекта';
+  if (/стоимост/.test(text)) return 'стоимость проекта';
+  if (/визуализатор/.test(text)) return 'визуализатора';
+  if (/инженер/.test(text)) return 'инженера';
+  if (/исполнител|сотрудник|фио/.test(text)) return 'сотрудника';
+  if (/метраж/.test(text)) return 'метраж';
+  if (/модел.*мотивац/.test(text)) return 'модель мотивации';
+  if (/грейд/.test(text)) return 'грейд сотрудника';
+  if (/ставк/.test(text)) return 'ставку';
+  if (/акт|дат/.test(text)) return 'даты актов';
+  if (/правил|начислен|стат/.test(text)) return 'правило расчёта';
+  return 'данные сделки';
+}
+
+function ownerDiagnosticAction_(reason) {
+  var text = String(reason || '').toLowerCase();
+  if (/справочник/.test(text)) return 'Добавить в справочник';
+  if (/не заполн|пуст/.test(text)) return 'Заполнить';
+  if (/не указан|отсутствует/.test(text)) return 'Указать';
+  if (/некоррект|положительн|нулев|отрицател|нечислов/.test(text)) return 'Исправить';
+  return 'Проверить';
+}
+
+function ownerUserDiagnostics_(source) {
+  return (source.skippedDeals || []).map(function (diagnostic) {
+    var reasons = diagnostic.reasons || [], actions = [], byAction = Object.create(null);
+    reasons.forEach(function (reason) {
+      var action = ownerDiagnosticAction_(reason), item = ownerDiagnosticItem_(reason), group = byAction[action];
+      if (!group) {
+        group = { action: action, items: [] };
+        byAction[action] = group;
+        actions.push(group);
+      }
+      if (group.items.indexOf(item) < 0) group.items.push(item);
+    });
+    if (!actions.length) actions.push({ action: 'Проверить', items: ['данные сделки'] });
+    var deal = (source.deals || {})[String(diagnostic.dealId)] || {};
+    return {
+      objectId: String(deal.objectId || diagnostic.dealId || 'ID не указан'),
+      address: String(deal.objectName || diagnostic.dealName || 'Адрес не указан'),
+      projectCost: diagnostic.projectCost,
+      actions: actions
+    };
+  });
 }
 
 function ownerCell_(sheetId, row, column, value) {
@@ -149,7 +197,7 @@ function ownerResponse_(source, state, selected) {
   var employees = Object.create(null), objects = Object.create(null);
   source.rows.forEach(function (r) { employees[r.employeeId] = r.employee; objects[r.objectKey] = r.object; });
   function options(map) { return Object.keys(map).map(function (id) { return { id: id, label: map[id] }; }).sort(function (a, b) { return a.label.localeCompare(b.label, 'ru'); }); }
-  return { version: state.version, filters: state.filters, summary: view.summary, employees: options(employees), objects: options(objects), statuses: PayrollOwnerCore.statuses, skippedDeals: source.skippedDeals || [], stale: state.sourceHash !== ownerHash_(PayrollOwnerCore.fingerprint(source.rows)) };
+  return { version: state.version, filters: state.filters, summary: view.summary, employees: options(employees), objects: options(objects), statuses: PayrollOwnerCore.statuses, skippedDeals: ownerUserDiagnostics_(source), stale: state.sourceHash !== ownerHash_(PayrollOwnerCore.fingerprint(source.rows)) };
 }
 
 function ownerContext_(ss, version) {
@@ -157,10 +205,15 @@ function ownerContext_(ss, version) {
   if (!saved) throw new Error('Сначала обновите интерфейс');
   var state = JSON.parse(saved);
   if (version && version !== state.version) throw new Error('Выдача изменена в другом окне. Обновите интерфейс.');
-  var source = ownerSource_(ss), sheet = ss.getSheetByName(PAYROLL_CONFIG.sheets.owner), rows = ownerViewRows_(sheet);
+  var sheet = ss.getSheetByName(PAYROLL_CONFIG.sheets.owner), rows = ownerViewRows_(sheet);
   PayrollOwnerCore.unique(rows);
+  var selected = rows.filter(function (r) { return r.selected && r.status !== 'Выплачено'; }).map(function (r) { return r.id; });
+  // Re-read the source only after capturing the current compact output and its
+  // selection. Nothing from the sidebar itself is trusted as payment input.
+  var source = ownerSource_(ss);
   var allowed = PayrollOwnerCore.view(source.rows, state.filters, []).rows.map(function (r) { return r.id; });
-  var selected = rows.filter(function (r) { return r.selected && r.status !== 'Выплачено' && allowed.indexOf(r.id) >= 0; }).map(function (r) { return r.id; });
+  // Keep every non-paid checked ID. ownerPlan_ must reject an unknown or
+  // out-of-filter ID explicitly instead of silently dropping a tampered row.
   return { state: state, source: source, sheet: sheet, rows: rows, selected: selected, allowed: allowed };
 }
 
@@ -193,15 +246,6 @@ function ownerPlan_(ctx) {
   return plan;
 }
 
-function ownerPreviewPayment(version) {
-  return withPayrollLock(function () {
-    var ctx = ownerContext_(getPayrollSpreadsheet_(), version), plan = ownerPlan_(ctx);
-    var preview = { token: Utilities.getUuid(), version: ctx.state.version, hash: ownerHash_(PayrollOwnerCore.fingerprint(plan)), expires: Date.now() + 5 * 60 * 1000 };
-    PropertiesService.getUserProperties().setProperty('payroll.owner.preview', JSON.stringify(preview));
-    return { token: preview.token, count: plan.length, amount: PayrollOwnerCore.summary(plan, ctx.selected).selectedAmount, ids: ctx.selected };
-  });
-}
-
 function ownerPaymentRequests_(table, plan, today, stamp) {
   var fields = { 'Статус': 'Выплачено', 'Оплатить': true, 'Дата выплаты': today, 'Обновлено': stamp };
   var requests = [];
@@ -216,26 +260,20 @@ function ownerPaymentRequests_(table, plan, today, stamp) {
   return requests;
 }
 
-function ownerConfirmPayment(token, version) {
+function ownerConfirmPayment(version) {
   return withPayrollLock(function () {
-    var ss = getPayrollSpreadsheet_(), saved = PropertiesService.getUserProperties().getProperty('payroll.owner.preview');
-    if (!saved) throw new Error('Сначала проверьте количество и сумму выбранных статей');
-    var preview = JSON.parse(saved), ctx = ownerContext_(ss, version);
-    if (preview.token !== token || preview.version !== ctx.state.version || preview.expires < Date.now()) throw new Error('Подтверждение устарело. Повторите предварительную проверку.');
-    var plan = ownerPlan_(ctx);
-    if (preview.hash !== ownerHash_(PayrollOwnerCore.fingerprint(plan))) throw new Error('Выбор или суммы изменились. Повторите предварительную проверку.');
+    var ss = getPayrollSpreadsheet_(), ctx = ownerContext_(ss, version), plan = ownerPlan_(ctx);
     var now = new Date(), stamp = now.toISOString(), today = Utilities.formatDate(now, ss.getSpreadsheetTimeZone(), 'dd.MM.yyyy');
     var requests = ownerPaymentRequests_(ctx.source.table, plan, today, stamp);
     // One Sheets API transaction: no source cell changes if ANY subrequest is invalid.
     Sheets.Spreadsheets.batchUpdate({ requests: requests }, ss.getId());
-    PropertiesService.getUserProperties().deleteProperty('payroll.owner.preview');
     var receipt = { paidCount: plan.length, amount: PayrollOwnerCore.summary(plan, ctx.selected).selectedAmount, ids: ctx.selected, paidAt: stamp };
     try {
       // SpreadsheetApp may return its pre-write read cache after a Sheets API
       // transaction. Render the reread source plus the successfully committed
       // fields instead of rereading through that cache in the same execution.
       var paidIds = PayrollOwnerCore.unique(plan);
-      var committed = { table: ctx.source.table, skippedDeals: ctx.source.skippedDeals || [], rows: ctx.source.rows.map(function (row) {
+      var committed = { table: ctx.source.table, skippedDeals: ctx.source.skippedDeals || [], deals: ctx.source.deals, rows: ctx.source.rows.map(function (row) {
         return paidIds[row.id] ? Object.assign({}, row, {
           status: 'Выплачено', paid: true, paymentDate: PayrollCore.toIsoDate(today), updatedAt: stamp
         }) : row;
@@ -264,4 +302,4 @@ function onEdit(e) {
   } finally { lock.releaseLock(); }
 }
 
-if (typeof module !== 'undefined') module.exports = { ownerApplyFilters: ownerApplyFilters, ownerGetState: ownerGetState, ownerPreviewPayment: ownerPreviewPayment, ownerConfirmPayment: ownerConfirmPayment, ownerPaymentRequests_: ownerPaymentRequests_, ownerCell_: ownerCell_, onOpen: onOpen, onEdit: onEdit, openPayrollSidebar: openPayrollSidebar };
+if (typeof module !== 'undefined') module.exports = { ownerApplyFilters: ownerApplyFilters, ownerGetState: ownerGetState, ownerConfirmPayment: ownerConfirmPayment, ownerPaymentRequests_: ownerPaymentRequests_, ownerUserDiagnostics_: ownerUserDiagnostics_, ownerCell_: ownerCell_, onOpen: onOpen, onEdit: onEdit, openPayrollSidebar: openPayrollSidebar };

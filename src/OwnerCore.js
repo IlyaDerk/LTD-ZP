@@ -42,7 +42,7 @@ var PayrollOwnerCore = (function () {
   }
   function plan(rows, ids, allowedIds) {
     var byId = unique(rows), seen = Object.create(null);
-    if (!ids.length) throw new Error('Не выбраны статьи для оплаты');
+    if (!ids.length) throw new Error('Не выбраны статьи со статусом “К оплате”');
     return ids.map(function (id) {
       if (seen[id]) throw new Error('Повторный ID в выборе: ' + id);
       seen[id] = true;
