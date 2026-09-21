@@ -1,6 +1,8 @@
 /* exported onOpen, onEdit, openPayrollSidebar, ownerApplyFilters, ownerGetState, ownerPreviewPayment, ownerConfirmPayment */
 var OWNER_HEADERS_ = ['ID статьи', 'Дата готовности', 'Объект', 'Сотрудник', 'Статья', 'Сумма', 'Статус', 'Выбрать', 'Дата выплаты', 'Комментарий'];
 var OWNER_HEADER_ROW_ = 10;
+var OWNER_SELECTED_COUNT_FORMULA_ = '=COUNTIFS(H11:H,TRUE,G11:G,"К оплате")';
+var OWNER_SELECTED_AMOUNT_FORMULA_ = '=SUMIFS(F11:F,H11:H,TRUE,G11:G,"К оплате")';
 
 function onOpen() {
   getPayrollSpreadsheet_();
@@ -45,7 +47,11 @@ function ownerCell_(sheetId, row, column, value) {
   return { updateCells: { range: { sheetId: sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: column - 1, endColumnIndex: column }, rows: [{ values: [v] }], fields: 'userEnteredValue' } };
 }
 
-function ownerLayoutValues_(sheet, values, includeHeaders) {
+function ownerFormulaCell_(sheetId, row, column, formula) {
+  return { updateCells: { range: { sheetId: sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: column - 1, endColumnIndex: column }, rows: [{ values: [{ userEnteredValue: { formulaValue: formula } }] }], fields: 'userEnteredValue' } };
+}
+
+function ownerLayoutValues_(sheet, values, formulas, includeHeaders) {
   var entries = [
     [1, 2, 'Зарплаты — интерфейс собственника'],
     [2, 2, 'Флажок только выбирает статью. Оплата — после подтверждения в sidebar.'],
@@ -55,9 +61,12 @@ function ownerLayoutValues_(sheet, values, includeHeaders) {
     [6, 2, ''], [7, 2, ''], [6, 4, ''], [7, 4, ''], [8, 2, '']
   ];
   if (includeHeaders) OWNER_HEADERS_.forEach(function (header, index) { entries.push([OWNER_HEADER_ROW_, index + 1, header]); });
-  return entries.filter(function (entry) {
+  var requests = entries.filter(function (entry) {
     return !values[entry[0] - 1] || values[entry[0] - 1][entry[1] - 1] !== entry[2];
   }).map(function (entry) { return ownerCell_(sheet.getSheetId(), entry[0], entry[1], entry[2]); });
+  if (!formulas[4] || formulas[4][7] !== OWNER_SELECTED_COUNT_FORMULA_) requests.push(ownerFormulaCell_(sheet.getSheetId(), 5, 8, OWNER_SELECTED_COUNT_FORMULA_));
+  if (!formulas[4] || formulas[4][8] !== OWNER_SELECTED_AMOUNT_FORMULA_) requests.push(ownerFormulaCell_(sheet.getSheetId(), 5, 9, OWNER_SELECTED_AMOUNT_FORMULA_));
+  return requests;
 }
 
 function ownerFormatLayout_(sheet) {
@@ -83,12 +92,12 @@ function ownerFormatLayout_(sheet) {
 function ownerLayout_(ss) {
   var sheet = ss.getSheetByName(PAYROLL_CONFIG.sheets.owner);
   if (!sheet) throw new Error('Не найден лист «Интерфейс собственника»');
-  var values = sheet.getDataRange().getValues();
+  var data = sheet.getDataRange(), values = data.getValues(), formulas = data.getFormulas();
   var initialized = values[OWNER_HEADER_ROW_ - 1] && OWNER_HEADERS_.every(function (h, i) { return values[OWNER_HEADER_ROW_ - 1][i] === h; });
   if (!initialized) {
     if (values.some(function (r) { return r.slice(0, 10).some(function (v) { return v !== ''; }); })) throw new Error('В области A:J интерфейса есть неизвестная структура. Она не была перезаписана.');
   }
-  var requests = ownerLayoutValues_(sheet, values, !initialized);
+  var requests = ownerLayoutValues_(sheet, values, formulas, !initialized);
   if (requests.length) Sheets.Spreadsheets.batchUpdate({ requests: requests }, ss.getId());
   ownerFormatLayout_(sheet);
   return sheet;
@@ -102,33 +111,31 @@ function ownerViewRows_(sheet) {
 }
 
 function ownerSummaryRequests_(sheet, summary) {
-  var entries = [[5, 2, summary.planned], [5, 3, summary.toPay], [5, 4, summary.paid], [5, 5, summary.total], [5, 7, summary.count], [5, 8, summary.selectedCount], [5, 9, summary.selectedAmount]];
+  var entries = [[5, 2, summary.planned], [5, 3, summary.toPay], [5, 4, summary.paid], [5, 5, summary.total], [5, 7, summary.count]];
   return entries.map(function (x) { return ownerCell_(sheet.getSheetId(), x[0], x[1], x[2]); });
 }
 
 function ownerRender_(ss, source, filters) {
   var view = PayrollOwnerCore.view(source.rows, filters, []), sheet = ownerLayout_(ss);
-  var previous = ownerViewRows_(sheet), byId = PayrollOwnerCore.unique(previous);
-  var next = Math.max(sheet.getLastRow() + 1, OWNER_HEADER_ROW_ + 1), requests = [];
-  var visible = view.rows.map(function (r) { return r.id; });
-  source.rows.forEach(function (r) {
-    var old = byId[r.id], target = old ? old._row : next++;
+  var previous = ownerViewRows_(sheet);
+  var previousLastRow = previous.reduce(function (last, row) { return Math.max(last, row._row); }, OWNER_HEADER_ROW_);
+  var lastManagedRow = Math.max(previousLastRow, OWNER_HEADER_ROW_ + view.rows.length), requests = [];
+  if (lastManagedRow > OWNER_HEADER_ROW_) {
+    requests.push({ updateCells: { range: { sheetId: sheet.getSheetId(), startRowIndex: OWNER_HEADER_ROW_, endRowIndex: lastManagedRow, startColumnIndex: 0, endColumnIndex: 10 }, rows: [], fields: 'userEnteredValue,note,dataValidation,userEnteredFormat.numberFormat' } });
+    requests.push({ updateDimensionProperties: { range: { sheetId: sheet.getSheetId(), dimension: 'ROWS', startIndex: OWNER_HEADER_ROW_, endIndex: lastManagedRow }, properties: { hiddenByUser: false }, fields: 'hiddenByUser' } });
+  }
+  view.rows.forEach(function (r, index) {
+    var target = OWNER_HEADER_ROW_ + 1 + index;
     var values = [r.id, r.readyDate, r.object, r.employee, r.article, r.amount, r.status, r.status === 'Выплачено', r.paymentDate, r.comment];
     values.forEach(function (v, i) {
-      if (old && old._formulas[i]) throw new Error('В управляемом столбце интерфейса обнаружена формула. Перезапись отменена.');
-      if (!old || old._values[i] !== v) requests.push(ownerCell_(sheet.getSheetId(), target, i + 1, v));
+      requests.push(ownerCell_(sheet.getSheetId(), target, i + 1, v));
     });
-    if (!old) {
-      requests.push({ setDataValidation: { range: { sheetId: sheet.getSheetId(), startRowIndex: target - 1, endRowIndex: target, startColumnIndex: 7, endColumnIndex: 8 }, rule: { condition: { type: 'BOOLEAN' }, strict: true, showCustomUi: true } } });
-      requests.push({ repeatCell: { range: { sheetId: sheet.getSheetId(), startRowIndex: target - 1, endRowIndex: target, startColumnIndex: 5, endColumnIndex: 6 }, cell: { userEnteredFormat: { numberFormat: { type: 'NUMBER', pattern: '#,##0.00 "₽"' } } }, fields: 'userEnteredFormat.numberFormat' } });
-    }
-    requests.push({ updateDimensionProperties: { range: { sheetId: sheet.getSheetId(), dimension: 'ROWS', startIndex: target - 1, endIndex: target }, properties: { hiddenByUser: visible.indexOf(r.id) < 0 }, fields: 'hiddenByUser' } });
   });
-  // Retain orphaned view rows and their user columns, but exclude them from the issue.
-  previous.filter(function (r) { return !source.rows.some(function (s) { return s.id === r.id; }); }).forEach(function (r) {
-    requests.push({ updateDimensionProperties: { range: { sheetId: sheet.getSheetId(), dimension: 'ROWS', startIndex: r._row - 1, endIndex: r._row }, properties: { hiddenByUser: true }, fields: 'hiddenByUser' } });
-  });
-  if (next - 1 > sheet.getMaxRows()) requests.unshift({ appendDimension: { sheetId: sheet.getSheetId(), dimension: 'ROWS', length: next - 1 - sheet.getMaxRows() } });
+  if (view.rows.length) {
+    requests.push({ setDataValidation: { range: { sheetId: sheet.getSheetId(), startRowIndex: OWNER_HEADER_ROW_, endRowIndex: OWNER_HEADER_ROW_ + view.rows.length, startColumnIndex: 7, endColumnIndex: 8 }, rule: { condition: { type: 'BOOLEAN' }, strict: true, showCustomUi: true } } });
+    requests.push({ repeatCell: { range: { sheetId: sheet.getSheetId(), startRowIndex: OWNER_HEADER_ROW_, endRowIndex: OWNER_HEADER_ROW_ + view.rows.length, startColumnIndex: 5, endColumnIndex: 6 }, cell: { userEnteredFormat: { numberFormat: { type: 'NUMBER', pattern: '#,##0.00 "₽"' } } }, fields: 'userEnteredFormat.numberFormat' } });
+  }
+  if (OWNER_HEADER_ROW_ + view.rows.length > sheet.getMaxRows()) requests.unshift({ appendDimension: { sheetId: sheet.getSheetId(), dimension: 'ROWS', length: OWNER_HEADER_ROW_ + view.rows.length - sheet.getMaxRows() } });
   Array.prototype.push.apply(requests, ownerSummaryRequests_(sheet, view.summary));
   Sheets.Spreadsheets.batchUpdate({ requests: requests }, ss.getId());
   var state = { version: Utilities.getUuid(), filters: view.filters, sourceHash: ownerHash_(PayrollOwnerCore.fingerprint(source.rows)) };
@@ -153,7 +160,7 @@ function ownerContext_(ss, version) {
   var source = ownerSource_(ss), sheet = ss.getSheetByName(PAYROLL_CONFIG.sheets.owner), rows = ownerViewRows_(sheet);
   PayrollOwnerCore.unique(rows);
   var allowed = PayrollOwnerCore.view(source.rows, state.filters, []).rows.map(function (r) { return r.id; });
-  var selected = rows.filter(function (r) { return r.selected && r.status !== 'Выплачено' && allowed.indexOf(r.id) >= 0 && !sheet.isRowHiddenByUser(r._row); }).map(function (r) { return r.id; });
+  var selected = rows.filter(function (r) { return r.selected && r.status !== 'Выплачено' && allowed.indexOf(r.id) >= 0; }).map(function (r) { return r.id; });
   return { state: state, source: source, sheet: sheet, rows: rows, selected: selected, allowed: allowed };
 }
 
@@ -248,22 +255,12 @@ function onEdit(e) {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(1000)) throw new Error('Интерфейс занят другим действием. Повторите выбор.');
   try {
-    var ss = getPayrollSpreadsheet_(), sheet = ss.getSheetByName(PAYROLL_CONFIG.sheets.owner);
-    var rows = ownerViewRows_(sheet), requests = [], selectedCount = 0, selectedAmount = 0;
-    if (!rows.some(function (row) { return row._row >= firstRow && row._row <= lastRow; })) return;
-    rows.forEach(function (row) {
-      if (row._row >= firstRow && row._row <= lastRow && row.status === 'Выплачено' && !row.selected) {
-        row.selected = true;
-        requests.push(ownerCell_(sheet.getSheetId(), row._row, 8, true));
-      }
-      if (row.selected && row.status !== 'Выплачено' && !sheet.isRowHiddenByUser(row._row)) {
-        selectedCount += 1;
-        selectedAmount += Number(row._values[5]) || 0;
-      }
+    var sheet = e.range.getSheet(), values = sheet.getRange(firstRow, 7, lastRow - firstRow + 1, 2).getValues(), requests = [];
+    values.forEach(function (row, index) {
+      var status = String(row[0] || ''), selected = row[1] === true, expected = status === 'Выплачено' ? true : status === 'К оплате' ? selected : false;
+      if (selected !== expected) requests.push(ownerCell_(sheet.getSheetId(), firstRow + index, 8, expected));
     });
-    requests.push(ownerCell_(sheet.getSheetId(), 5, 8, selectedCount));
-    requests.push(ownerCell_(sheet.getSheetId(), 5, 9, Math.round(selectedAmount * 100) / 100));
-    Sheets.Spreadsheets.batchUpdate({ requests: requests }, ss.getId());
+    if (requests.length) Sheets.Spreadsheets.batchUpdate({ requests: requests }, sheet.getParent().getId());
   } finally { lock.releaseLock(); }
 }
 

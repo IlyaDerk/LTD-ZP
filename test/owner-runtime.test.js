@@ -4,13 +4,16 @@ const workbook = require('./helpers/owner-workbook');
 const payments = w => JSON.stringify(w.cells('Статьи оплаты'));
 const plain = v => JSON.parse(JSON.stringify(v));
 const cell = (w, row, column) => w.readValue(w.cells('Интерфейс собственника')[row - 1]?.[column - 1]);
+const formula = (w, row, column) => w.cells('Интерфейс собственника')[row - 1]?.[column - 1]?.value?.formulaValue || '';
 
 test('сводка использует новые семь координат и очищает только прежние служебные ячейки', () => {
   const w = workbook(), state = w.api.ownerGetState();
   assert.deepEqual([
     cell(w, 5, 2), cell(w, 5, 3), cell(w, 5, 4), cell(w, 5, 5),
-    cell(w, 5, 7), cell(w, 5, 8), cell(w, 5, 9)
-  ], [state.summary.planned, state.summary.toPay, state.summary.paid, state.summary.total, state.summary.count, 0, 0]);
+    cell(w, 5, 7)
+  ], [state.summary.planned, state.summary.toPay, state.summary.paid, state.summary.total, state.summary.count]);
+  assert.equal(formula(w, 5, 8), '=COUNTIFS(H11:H,TRUE,G11:G,"К оплате")');
+  assert.equal(formula(w, 5, 9), '=SUMIFS(F11:F,H11:H,TRUE,G11:G,"К оплате")');
   assert.deepEqual([cell(w, 4, 2), cell(w, 4, 3), cell(w, 4, 4), cell(w, 4, 5), cell(w, 4, 7), cell(w, 4, 8), cell(w, 4, 9)],
     ['Запланировано', 'К оплате', 'Выплачено', 'Итого', 'Найдено статей', 'Выбрано статей', 'Сумма выбранных']);
   assert.deepEqual(w.cells('Интерфейс собственника')[9].slice(0, 10).map(value => w.readValue(value)),
@@ -46,22 +49,29 @@ test('onEdit игнорирует изменения вне Выбрать и н
   assert.deepEqual(w.cells('Интерфейс собственника'), before);
 });
 
-test('onEdit checkbox обновляет только H5:I5, поддерживает диапазон и не читает справочники', () => {
+test('onEdit не пишет H5:I5, поддерживает диапазон и не читает источники', () => {
   const w = workbook(); w.api.ownerGetState();
-  const ids = ['PAY-ED36BAC4', 'PAY-8D4056C3'];
-  const indexes = ids.map(id => w.cells('Интерфейс собственника').findIndex(row => w.readValue(row?.[0]) === id));
-  indexes.forEach(index => w.value('Интерфейс собственника', index + 1, 8, true));
-  const before = structuredClone(w.cells('Интерфейс собственника'));
+  const rows = w.cells('Интерфейс собственника');
+  const indexes = ['К оплате', 'Запланировано', 'Выплачено'].map(status => rows.findIndex(row => w.readValue(row?.[6]) === status));
+  const cancelled = rows.findIndex((row, index) => index >= 10 && !indexes.includes(index) && w.readValue(row?.[0]));
+  indexes.splice(2, 0, cancelled);
+  assert.ok(indexes.every(index => index >= 10));
+  w.value('Интерфейс собственника', indexes[2] + 1, 7, 'Отменено');
+  w.value('Интерфейс собственника', indexes[0] + 1, 8, true);
+  w.value('Интерфейс собственника', indexes[1] + 1, 8, true);
+  w.value('Интерфейс собственника', indexes[2] + 1, 8, true);
+  w.value('Интерфейс собственника', indexes[3] + 1, 8, false);
+  const formulas = [formula(w, 5, 8), formula(w, 5, 9)];
   const source = payments(w); let reads = 0; const read = w.api.readPayrollWorkbook;
   w.api.readPayrollWorkbook = ss => { reads += 1; return read(ss); };
   const first = Math.min(...indexes) + 1, last = Math.max(...indexes) + 1;
   w.api.onEdit({ range: w.range('Интерфейс собственника', first, 8, last - first + 1, 1) });
   assert.equal(reads, 0); assert.equal(payments(w), source);
-  assert.equal(cell(w, 5, 8), 2); assert.equal(cell(w, 5, 9), 165000);
-  w.cells('Интерфейс собственника').forEach((row, ri) => row.forEach((value, ci) => {
-    if (ri === 4 && (ci === 7 || ci === 8)) return;
-    assert.deepEqual(value, before[ri]?.[ci]);
-  }));
+  assert.deepEqual([formula(w, 5, 8), formula(w, 5, 9)], formulas);
+  assert.equal(cell(w, indexes[0] + 1, 8), true, 'К оплате разрешено выбрать');
+  assert.equal(cell(w, indexes[1] + 1, 8), false, 'Запланировано нельзя выбрать');
+  assert.equal(cell(w, indexes[2] + 1, 8), false, 'Отменено нельзя выбрать');
+  assert.equal(cell(w, indexes[3] + 1, 8), true, 'Выплачено восстанавливается');
 });
 
 for (const ids of [['PAY-ED36BAC4'], ['PAY-ED36BAC4', 'PAY-8D4056C3']]) {
@@ -110,7 +120,8 @@ test('реальные адаптеры: checkbox выбирает, preview ни
   assert.equal(w.readValue(w.cells('Статьи оплаты')[11][10]), 'К оплате');
   assert.throws(() => w.api.ownerConfirmPayment(quote.token, state.version), /Сначала/);
   w.select('PAY-ED36BAC4', false);
-  assert.equal(w.readValue(w.cells('Интерфейс собственника')[16][7]), true);
+  const paid = w.cells('Интерфейс собственника').find(r => w.readValue(r?.[0]) === 'PAY-ED36BAC4');
+  assert.equal(w.readValue(paid[7]), true);
   assert.equal(w.api.ownerGetState().summary.selectedCount, 0);
 });
 
@@ -134,7 +145,9 @@ test('две выплаты записываются одним атомарны
 
 test('одна невалидная выбранная статья отменяет всю группу без частичных записей', () => {
   const w = workbook(), state = w.api.ownerGetState(), before = payments(w);
-  w.select('PAY-ED36BAC4'); w.select('PA-003');
+  w.select('PAY-ED36BAC4');
+  const invalid = w.cells('Интерфейс собственника').findIndex(row => w.readValue(row?.[0]) === 'PA-003');
+  w.value('Интерфейс собственника', invalid + 1, 8, true); // имитируем обход onEdit внешней записью
   assert.throws(() => w.api.ownerPreviewPayment(state.version), /не может быть оплачена/);
   assert.equal(payments(w), before);
 });
@@ -157,21 +170,72 @@ test('ошибка Sheets API не оставляет частичную вып�
   assert.equal(payments(w), before);
 });
 
-test('фильтры не перемещают неизвестные столбцы или validation относительно ID', () => {
-  const w = workbook(); w.api.ownerGetState();
+test('фильтр создаёт компактную выдачу, очищает остатки и сохраняет области вне A:J', () => {
+  const w = workbook(), source = payments(w); w.api.ownerGetState();
+  const initialCount = cell(w, 5, 7);
+  assert.ok(initialCount > 1);
   w.value('Интерфейс собственника', 10, 11, 'Личная заметка');
-  w.value('Интерфейс собственника', 17, 11, 'Не перемещать');
-  w.cells('Интерфейс собственника')[16][10].validation = { condition: { type: 'ONE_OF_LIST', values: [{ userEnteredValue: 'Не перемещать' }] } };
-  const cell = structuredClone(w.cells('Интерфейс собственника')[16][10]);
+  w.value('Интерфейс собственника', 11, 11, 'Не очищать');
+  w.cells('Интерфейс собственника')[10][10].validation = { condition: { type: 'ONE_OF_LIST', values: [{ userEnteredValue: 'Не очищать' }] } };
+  const personal = structuredClone(w.cells('Интерфейс собственника')[10][10]);
   const state = w.api.ownerApplyFilters({ employee: 'EMP_002' });
   assert.equal(state.summary.count, 1);
-  assert.equal(w.hidden['Интерфейс собственника'][17], true);
-  assert.equal(w.hidden['Интерфейс собственника'][18], false);
-  assert.deepEqual(w.cells('Интерфейс собственника')[16][10], cell);
-  w.select('PAY-ED36BAC4'); // hidden checkbox is never part of the current issue
-  assert.equal(w.api.ownerGetState().summary.selectedCount, 0);
-  w.api.ownerApplyFilters({});
-  assert.deepEqual(w.cells('Интерфейс собственника')[16][10], cell);
+  assert.equal(cell(w, 5, 7), 1);
+  assert.notEqual(cell(w, 11, 1), '');
+  for (let row = 12; row <= 10 + initialCount; row += 1) for (let column = 1; column <= 10; column += 1) {
+    assert.equal(cell(w, row, column), '');
+    assert.equal(w.cells('Интерфейс собственника')[row - 1]?.[column - 1]?.validation, undefined);
+  }
+  assert.deepEqual(w.cells('Интерфейс собственника')[10][10], personal);
+  assert.equal(cell(w, 10, 11), 'Личная заметка');
+  assert.ok(!Object.values(w.hidden['Интерфейс собственника']).some(Boolean), 'выдача не должна использовать скрытие строк');
+  assert.equal(payments(w), source, 'фильтрация не меняет Статьи оплаты');
+  assert.equal(formula(w, 5, 8), '=COUNTIFS(H11:H,TRUE,G11:G,"К оплате")');
+  assert.equal(formula(w, 5, 9), '=SUMIFS(F11:F,H11:H,TRUE,G11:G,"К оплате")');
+  assert.equal(w.cells('Интерфейс собственника')[10][7].validation.condition.type, 'BOOLEAN');
+  assert.deepEqual(w.cells('Интерфейс собственника')[10][5].format.numberFormat, { type: 'NUMBER', pattern: '#,##0.00 "₽"' });
+  assert.equal(cell(w, 11, 8), cell(w, 11, 7) === 'Выплачено');
+});
+
+test('данные в K и далее не расширяют очистку и раскрытие управляемой выдачи', () => {
+  const w = workbook();
+  w.value('Интерфейс собственника', 200, 11, 'Пользовательские данные');
+  w.cells('Интерфейс собственника')[199][10].format = { backgroundColor: { red: 1 } };
+  w.hidden['Интерфейс собственника'][200] = true;
+  const personal = structuredClone(w.cells('Интерфейс собственника')[199][10]);
+  const state = w.api.ownerGetState(), batch = w.calls.at(-1);
+  const clear = batch.find(request => request.updateCells?.fields.includes('dataValidation'));
+  const reveal = batch.find(request => request.updateDimensionProperties);
+  assert.equal(clear.updateCells.range.endRowIndex, 10 + state.summary.count);
+  assert.equal(reveal.updateDimensionProperties.range.endIndex, 10 + state.summary.count);
+  assert.equal(reveal.updateDimensionProperties.properties.hiddenByUser, false);
+  assert.deepEqual(w.cells('Интерфейс собственника')[199][10], personal);
+  assert.equal(w.hidden['Интерфейс собственника'][200], true);
+});
+
+test('прежняя выдача раскрывается внутри единого batchUpdate и не затрагивает другие строки', () => {
+  const w = workbook(), initial = w.api.ownerGetState(), previousLast = 10 + initial.summary.count;
+  w.hidden['Интерфейс собственника'][previousLast] = true;
+  w.hidden['Интерфейс собственника'][previousLast + 20] = true;
+  const calls = w.calls.length;
+  const state = w.api.ownerApplyFilters({ employee: 'EMP_002' });
+  assert.equal(state.summary.count, 1);
+  assert.equal(w.calls.length, calls + 1);
+  const batch = w.calls.at(-1), reveal = batch.find(request => request.updateDimensionProperties);
+  assert.equal(reveal.updateDimensionProperties.range.startIndex, 10);
+  assert.equal(reveal.updateDimensionProperties.range.endIndex, previousLast);
+  assert.equal(w.hidden['Интерфейс собственника'][previousLast], false);
+  assert.equal(w.hidden['Интерфейс собственника'][previousLast + 20], true);
+});
+
+test('ошибка batchUpdate не оставляет отдельно применённого раскрытия строк', () => {
+  const w = workbook(); w.api.ownerGetState();
+  w.hidden['Интерфейс собственника'][11] = true;
+  const before = structuredClone(w.cells('Интерфейс собственника'));
+  w.failNextBatch();
+  assert.throws(() => w.api.ownerApplyFilters({ employee: 'EMP_002' }), /Atomic API failure/);
+  assert.equal(w.hidden['Интерфейс собственника'][11], true);
+  assert.deepEqual(w.cells('Интерфейс собственника'), before);
 });
 
 test('пустой результат сохраняет источник и возвращает нулевые показатели', () => {

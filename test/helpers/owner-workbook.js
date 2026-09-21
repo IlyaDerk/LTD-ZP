@@ -25,6 +25,8 @@ module.exports = function workbook() {
     const r = {
       getSheet: () => sheet(name), getRow: () => row, getColumn: () => col,
       getNumRows: () => numRows, getNumColumns: () => numCols,
+      getValues: () => Array.from({ length: numRows }, (_, ri) => Array.from({ length: numCols }, (_, ci) => readValue(data[name][row - 1 + ri]?.[col - 1 + ci]))),
+      getFormulas: () => Array.from({ length: numRows }, (_, ri) => Array.from({ length: numCols }, (_, ci) => data[name][row - 1 + ri]?.[col - 1 + ci]?.value?.formulaValue || '')),
       setValue(v) { value(name, row, col, v); return r; },
       setValues(values) { values.forEach((line, ri) => line.forEach((v, ci) => value(name, row + ri, col + ci, v))); return r; },
       getNote() { return data[name][row - 1]?.[col - 1]?.note || ''; },
@@ -79,26 +81,44 @@ module.exports = function workbook() {
       if (!locked) throw Error('Write outside shared ScriptLock');
       if (id !== ss.getId()) throw Error('Wrong target');
       if (failBatch) { failBatch = false; throw Error('Atomic API failure'); }
-      const old = data;
+      const old = data, oldHidden = structuredClone(hidden), oldMeta = structuredClone(meta);
       data = structuredClone(data);
       try {
         for (const request of body.requests) {
           const update = request.updateCells;
           if (update) {
-            if (update.fields !== 'userEnteredValue') throw Error('Unexpected source field mask');
             const name = Object.keys(meta).find(n => meta[n].id === update.range.sheetId);
             if (!name) throw Error('Unknown sheet');
-            update.rows.forEach((r, ri) => r.values.forEach((c, ci) => {
+            if (!update.rows?.length) {
+              for (let row = update.range.startRowIndex; row < update.range.endRowIndex; row += 1) {
+                for (let col = update.range.startColumnIndex; col < update.range.endColumnIndex; col += 1) {
+                  const cell = ((data[name][row] ||= [])[col] ||= {});
+                  if (update.fields.includes('userEnteredValue')) { delete cell.value; delete cell.effective; }
+                  if (update.fields.includes('note')) delete cell.note;
+                  if (update.fields.includes('dataValidation')) delete cell.validation;
+                  if (update.fields.includes('userEnteredFormat.numberFormat') && cell.format) delete cell.format.numberFormat;
+                }
+              }
+            }
+            (update.rows || []).forEach((r, ri) => r.values.forEach((c, ci) => {
               const row = update.range.startRowIndex + ri, col = update.range.startColumnIndex + ci;
               const cell = ((data[name][row] ||= [])[col] ||= {});
               cell.value = structuredClone(c.userEnteredValue || {}); cell.effective = cell.value;
             }));
           } else if (request.setDataValidation) {
             const d = request.setDataValidation, name = Object.keys(meta).find(n => meta[n].id === d.range.sheetId);
-            data[name][d.range.startRowIndex][d.range.startColumnIndex].validation = structuredClone(d.rule);
+            for (let row = d.range.startRowIndex; row < d.range.endRowIndex; row += 1) for (let col = d.range.startColumnIndex; col < d.range.endColumnIndex; col += 1) {
+              const cell = ((data[name][row] ||= [])[col] ||= {}); cell.validation = structuredClone(d.rule);
+            }
+          } else if (request.repeatCell) {
+            const d = request.repeatCell, name = Object.keys(meta).find(n => meta[n].id === d.range.sheetId);
+            for (let row = d.range.startRowIndex; row < d.range.endRowIndex; row += 1) for (let col = d.range.startColumnIndex; col < d.range.endColumnIndex; col += 1) {
+              const cell = ((data[name][row] ||= [])[col] ||= {}); cell.format ||= {};
+              if (d.cell.userEnteredFormat?.numberFormat) cell.format.numberFormat = structuredClone(d.cell.userEnteredFormat.numberFormat);
+            }
           } else if (request.updateDimensionProperties) {
             const d = request.updateDimensionProperties, name = Object.keys(meta).find(n => meta[n].id === d.range.sheetId);
-            hidden[name][d.range.startIndex + 1] = d.properties.hiddenByUser;
+            for (let row = d.range.startIndex; row < d.range.endIndex; row += 1) hidden[name][row + 1] = d.properties.hiddenByUser;
           } else if (request.appendDimension) {
             const d = request.appendDimension, name = Object.keys(meta).find(n => meta[n].id === d.sheetId); meta[name].rows += d.length;
           } else if (request.deleteDimension) {
@@ -106,7 +126,12 @@ module.exports = function workbook() {
             data[name].splice(d.startIndex, d.endIndex - d.startIndex); meta[name].rows -= d.endIndex - d.startIndex;
           }
         }
-      } catch (error) { data = old; throw error; }
+      } catch (error) {
+        data = old;
+        Object.keys(hidden).forEach(name => { hidden[name] = oldHidden[name]; });
+        Object.keys(meta).forEach(name => { meta[name] = oldMeta[name]; });
+        throw error;
+      }
       calls.push(structuredClone(body.requests));
     } } }
   });
