@@ -95,10 +95,13 @@ var PayrollCore = (function () {
       }
     }
     if (/^(да|есть)$/i.test(String(deal.rollouts || '').trim())) {
-      var rolloutRule = oneRule(input.rules, 'R_TAMBOV_ROLLOUTS', errors);
       var rolloutEmployee = validateEmployee(input.employees, deal.engineer, iso(deal.act1) || now, errors);
-      if (rolloutEmployee && norm(rolloutEmployee.model) !== 'тамбов') addError(errors, 'Для развёрток требуется сотрудник с моделью мотивации «Тамбов»');
-      if (rolloutRule && rolloutEmployee && norm(rolloutEmployee.model) === 'тамбов') candidates.push(rolloutRule);
+      // Rollouts are a separate payable article only in the Tambov model.
+      // The same CRM flag is informational for Moscow and must not reject or alter the regular Moscow calculation.
+      if (rolloutEmployee && norm(rolloutEmployee.model) === 'тамбов') {
+        var rolloutRule = oneRule(input.rules, 'R_TAMBOV_ROLLOUTS', errors);
+        if (rolloutRule) candidates.push(rolloutRule);
+      }
     }
     return candidates;
   }

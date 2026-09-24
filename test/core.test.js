@@ -154,12 +154,14 @@ test('пустой ID сотрудника в справочнике откло�
 });
 
 test('для пропущенной сделки собираются все причины', () => {
-  const { result, warnings } = captureCalculation(f.input(f.deal({ projectCost: 0, rollouts: 'Да' })));
+  const rules = f.rules.filter(rule => rule.id !== 'R_TAMBOV_ROLLOUTS');
+  const deal = f.deal({ projectCost: 0, rollouts: 'Да', engineer: 'Иван Тамбов' });
+  const { result, warnings } = captureCalculation(f.input(deal, { rules }));
   const reasons = result.skippedDeals[0].reasons;
   assert.equal(result.rows.length, 0);
-  assert.ok(reasons.length >= 3);
+  assert.ok(reasons.length >= 2);
   assert.ok(reasons.some(reason => /положительным числом/.test(reason)));
-  assert.ok(reasons.some(reason => /развёрток/.test(reason)));
+  assert.ok(reasons.some(reason => /R_TAMBOV_ROLLOUTS/.test(reason)));
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /D1/);
   reasons.forEach(reason => assert.ok(warnings[0].includes(reason)));
